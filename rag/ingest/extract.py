@@ -30,6 +30,48 @@ logger = logging.getLogger(__name__)
 class _Block:
     text: str
     in_margin: bool
+    is_code: bool = False
+
+
+_MONO_FLAG = 8  # PyMuPDF span flag bit for monospaced fonts
+_SUPERSCRIPT_FLAG = 1
+_CODE_SHARE = 0.6  # a block is code when this share of its characters is monospaced
+
+
+def _line_text(spans: List[dict]) -> str:
+    """Join the spans of one line. Superscripts (footnote marks, exponents) get a ^ prefix so
+    "fan-out" + superscript "ii" reads "fan-out^ii" instead of the fused "fan-outii"."""
+    parts = []
+    for span in spans:
+        text = span["text"]
+        if span["flags"] & _SUPERSCRIPT_FLAG and not span["flags"] & _MONO_FLAG and text.strip():
+            text = "^" + text.strip()
+        parts.append(text)
+    return "".join(parts)
+
+
+def _block_text(block: dict) -> tuple:
+    """Return (text, is_code) for one PyMuPDF dict block."""
+    lines = block["lines"]
+    mono = total = 0
+    for line in lines:
+        for span in line["spans"]:
+            total += len(span["text"])
+            if span["flags"] & _MONO_FLAG:
+                mono += len(span["text"])
+    is_code = total > 0 and mono / total >= _CODE_SHARE
+    if not is_code:
+        return "\n".join(_line_text(line["spans"]) for line in lines), False
+
+    # Code keeps its line breaks and indentation. Indent is measured in character cells.
+    first = next(s for line in lines for s in line["spans"] if s["text"].strip())
+    cell = (first["bbox"][2] - first["bbox"][0]) / max(len(first["text"]), 1) or 1.0
+    left = min(line["bbox"][0] for line in lines)
+    out = []
+    for line in lines:
+        indent = max(0, round((line["bbox"][0] - left) / cell))
+        out.append(" " * indent + "".join(s["text"] for s in line["spans"]).rstrip())
+    return "\n".join(out), True
 
 
 def _read_blocks(
@@ -40,14 +82,16 @@ def _read_blocks(
         for page in doc:
             height = page.rect.height
             blocks = []
-            for x0, y0, x1, y1, text, _no, kind in page.get_text("blocks", sort=True):
-                if kind != 0:  # 0 = text, 1 = image
+            for block in page.get_text("dict", sort=True)["blocks"]:
+                if block["type"] != 0:  # 0 = text, 1 = image
                     continue
+                _x0, y0, _x1, y1 = block["bbox"]
                 centre = (y0 + y1) / 2  # a footer can start a little above the zone edge
                 in_margin = centre <= height * header_fraction or centre >= height * (
                     1 - footer_fraction
                 )
-                blocks.append(_Block(text=text, in_margin=in_margin))
+                text, is_code = _block_text(block)
+                blocks.append(_Block(text=text, in_margin=in_margin, is_code=is_code))
             pages.append(blocks)
     return pages
 
@@ -68,8 +112,20 @@ def build_pages(
     repeated = _repeated_margin_keys(raw, repeat_threshold)
     pages: List[Page] = []
     for index, blocks in enumerate(raw, start=1):
-        kept = []
+        kept: List[str] = []
+        code_run: List[str] = []  # consecutive code blocks merge into one fenced block
+
+        def flush_code() -> None:
+            if code_run:
+                kept.append("```\n" + "\n".join(code_run) + "\n```")
+                code_run.clear()
+
         for block in blocks:
+            if block.is_code and not block.in_margin:
+                code = "\n".join(line.rstrip() for line in block.text.splitlines()).strip("\n")
+                if code.strip():
+                    code_run.append(code)
+                continue
             text = clean_block(block.text)
             if is_noise(text):
                 continue
@@ -77,7 +133,9 @@ def build_pages(
                 normalize_key(text) in repeated or is_running_footer(text)
             ):
                 continue
+            flush_code()
             kept.append(text)
+        flush_code()
         pages.append(Page(page_no=index, text="\n\n".join(kept)))
     return pages
 

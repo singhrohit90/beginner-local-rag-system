@@ -1,7 +1,13 @@
 import pymupdf
 
 from rag.ingest.clean import clean_block, is_noise, normalize_key
-from rag.ingest.extract import extract_pages, extract_toc, load_pages, save_pages
+from rag.ingest.extract import (
+    _line_text,
+    extract_pages,
+    extract_toc,
+    load_pages,
+    save_pages,
+)
 
 
 def make_pdf(path, n_pages=6):
@@ -51,6 +57,28 @@ def test_running_footer_pattern_removed_even_when_text_never_repeats(tmp_path):
     for i, page in enumerate(extract_pages(path), start=1):
         assert "|" not in page.text
         assert f"Body text number {i}" in page.text
+
+
+def test_code_block_keeps_lines_and_indent_and_is_fenced(tmp_path):
+    doc = pymupdf.open()
+    page = doc.new_page(width=595, height=842)
+    page.insert_text((72, 120), "You could write a query such as the following one:", fontsize=11)
+    code = "SELECT *\n    FROM tweets\n    WHERE id = 1"
+    page.insert_text((72, 160), code, fontsize=9, fontname="cour")
+    page.insert_text((72, 260), "That query is slow for large tables.", fontsize=11)
+    path = tmp_path / "code.pdf"
+    doc.save(path)
+    doc.close()
+    text = extract_pages(path)[0].text
+    assert "```\nSELECT *\n    FROM tweets\n    WHERE id = 1\n```" in text
+    assert text.index("You could write") < text.index("```") < text.index("That query")
+
+
+def test_superscript_is_marked():
+    plain = {"text": "fan-out", "flags": 6}
+    sup = {"text": "ii", "flags": 5}
+    assert _line_text([plain, sup]) == "fan-out^ii"
+    assert _line_text([{"text": "10", "flags": 4}, {"text": "9", "flags": 5}]) == "10^9"
 
 
 def test_toc_extracted(tmp_path):
