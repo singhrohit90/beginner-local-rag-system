@@ -43,6 +43,19 @@ def load_chunks(path: Path) -> List[Chunk]:
     return chunks
 
 
+def load_chunkset(directory: Path, strategy: str) -> ChunkSet:
+    """Read back what ChunkSet.save wrote, including parents for parent_child."""
+    path = directory / f"{strategy}.jsonl"
+    params: Dict[str, Any] = {}
+    with open(path, encoding="utf-8") as f:
+        first = json.loads(f.readline())
+        if "_params" in first:
+            params = first["_params"]
+    parents_path = directory / f"{strategy}.parents.jsonl"
+    parents = {c.chunk_id: c for c in load_chunks(parents_path)} if parents_path.exists() else {}
+    return ChunkSet(strategy, params, load_chunks(path), parents)
+
+
 class Chunker(Protocol):
     name: str
 

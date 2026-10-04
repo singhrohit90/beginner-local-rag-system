@@ -11,7 +11,7 @@ can be measured and every wrong answer can be traced to a stage.
 | 2 | `rag/eval/golden.py` golden question format | done, questions still to be written |
 | 3 | `rag/trace.py`, `rag/eval/{metrics,diagnose,run_eval}.py` | done |
 | 4 | `rag/chunking` fixed, recursive, semantic, heading-aware, parent-child | done; semantic still to be built with a real embedder |
-| 5 | dense, BM25, fusion, rerank, context selection | |
+| 5 | `rag/retrieval` dense, BM25, fusion, rerank, context selection; `rag/experiment.py` | done, no LLM yet |
 | 6 | generation and answer judge | |
 | 7 | security tests (injection, poisoning, access control) | |
 
@@ -72,6 +72,26 @@ chunk passes easily, so read it with the size columns. The real comparison is re
 quality from the eval harness.
 
 Semantic chunking needs the extras: `pip install sentence-transformers` (pulls in torch).
+
+## Step 5: retrieval experiments
+
+    python -m rag.experiment                              # dense, bm25, rrf, weighted for all chunkers
+    python -m rag.experiment --configs dense_rerank,rrf_rerank
+    python -m rag.experiment --chunkers recursive --variant heading --rebuild
+
+Each stage is its own module in `rag/retrieval/`: `store.py` (numpy vectors, exact cosine search),
+`bm25.py`, `fusion.py` (RRF and weighted min-max), `rerank.py` (cross-encoder), `select.py` (dedupe,
+parents, word budget) and `pipeline.py`, which calls them in order and records each stage in the
+trace. Embeddings are cached in `data/processed/index/`.
+
+Reading the table: `cand@30` is recall among the 30 candidates before reranking and context
+selection, and `hit@5` is whether any gold page is in the final 5 passages. A big gap between them
+means the evidence was found but ranked too low. The failures column uses the labels from step 3.
+
+The golden set has 37 answerable questions, so one question moves a score by about 2.7 points and
+differences of a few points are noise. Trust only gaps that are large and appear across chunkers.
+The embedding model silently truncates inputs above its token limit (384 for mpnet); the run logs
+how many chunks of each strategy are affected.
 
 ## Step 3: evaluate any pipeline
 

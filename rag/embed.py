@@ -71,6 +71,17 @@ class SentenceTransformerEmbedder:
         vector = self._model.encode([self._query_prefix + text], normalize_embeddings=True)
         return np.asarray(vector[0], dtype=np.float32)
 
+    @property
+    def max_tokens(self) -> int:
+        """Longer inputs are silently truncated by the model, so their tail is never embedded."""
+        return int(self._model.max_seq_length)
+
+    def count_tokens(self, texts: List[str]) -> List[int]:
+        encoded = self._model.tokenizer(
+            [self._doc_prefix + t for t in texts], add_special_tokens=True, truncation=False
+        )
+        return [len(ids) for ids in encoded["input_ids"]]
+
 
 def get_embedder(spec: str) -> Embedder:
     if spec == "hash":
