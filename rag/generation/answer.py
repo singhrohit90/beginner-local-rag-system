@@ -45,10 +45,26 @@ class Answer:
     output_tokens: int
 
 
-def answer_from_context(llm: LLM, question: str, context: List[Hit]) -> tuple:
-    """Returns (Answer, user_prompt)."""
-    user_prompt = build_user_prompt(question, context)
-    result = llm.generate(SYSTEM_PROMPT, user_prompt, max_output_tokens=600)
+def answer_from_context(
+    llm: LLM, question: str, context: List[Hit], style: str = "standard"
+) -> tuple:
+    """Returns (Answer, user_prompt). style picks the prompts:
+    standard   the production prompt, which tells the model to ignore instructions in passages
+    spotlight  also wraps passages in nonce tags and repeats the warning (rag.security.defenses)
+    naive      a first-draft prompt with no injection rules, used only as a baseline in tests"""
+    if style == "spotlight":
+        from rag.security.defenses import SPOTLIGHT_SYSTEM_PROMPT, spotlight_user_prompt
+
+        system, user_prompt = SPOTLIGHT_SYSTEM_PROMPT, spotlight_user_prompt(question, context)
+    elif style == "naive":
+        from rag.security.defenses import NAIVE_SYSTEM_PROMPT
+
+        system, user_prompt = NAIVE_SYSTEM_PROMPT, build_user_prompt(question, context)
+    elif style == "standard":
+        system, user_prompt = SYSTEM_PROMPT, build_user_prompt(question, context)
+    else:
+        raise ValueError(f"unknown prompt style {style!r}")
+    result = llm.generate(system, user_prompt, max_output_tokens=600)
     return (
         Answer(
             text=result.text,
