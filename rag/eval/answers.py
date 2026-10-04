@@ -82,6 +82,10 @@ def score_answer(q: GoldQuestion, trace: Trace, judge: Optional[LLM]) -> Dict[st
 
 
 def _rate(rows: Sequence[Dict[str, Any]], key: str) -> Optional[float]:
+    """Share of rows where `key` is true. None if any row is unjudged: a rate over only the
+    judged rows (for example just the abstentions) would look like a real score and mislead."""
+    if any(r.get("outcome") == "unjudged" for r in rows) and key in ("correct", "faithful"):
+        return None
     values = [r[key] for r in rows if r.get(key) is not None]
     return round(sum(values) / len(values), 3) if values else None
 

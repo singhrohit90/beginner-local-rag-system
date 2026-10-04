@@ -116,6 +116,16 @@ def test_aggregate_summarises_by_type():
     assert report["answerable"]["by_type"]["factual"]["n"] == 1
 
 
+def test_unjudged_answers_do_not_produce_a_misleading_correct_rate():
+    answered = score_answer(ANSWERABLE, trace_with("It is X [S1].", [10], [1]), None)
+    refused = score_answer(GoldQuestion("b", "Q?", "factual", True, "ref", [(10, 10)]),
+                           trace_with(ABSTAIN, [30]), None)
+    assert answered["outcome"] == "unjudged" and refused["outcome"] == "retrieval_fail"
+    report = aggregate([answered, refused])
+    assert report["answerable"]["correct"] is None  # not 0.0 from the one refusal
+    assert report["answerable"]["outcomes"] == {"unjudged": 1, "retrieval_fail": 1}
+
+
 def test_cached_llm_calls_inner_once(tmp_path):
     inner = FakeLLM(lambda s, u: "answer")
     cached = CachedLLM(inner, tmp_path)

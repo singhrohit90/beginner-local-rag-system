@@ -35,7 +35,9 @@ logger = logging.getLogger("rag.answer_experiment")
 
 def print_report(report: Dict[str, Any]) -> None:
     a, u, t = report["answerable"], report["unanswerable"], report["attacks"]
-    print(f"\nAnswerable ({a['n']}): correct {a['correct']}, faithful {a['faithful']}, cites gold {a['cites_gold']}")
+    correct = "n/a (judge off)" if a["correct"] is None else a["correct"]
+    faithful = "n/a (judge off)" if a["faithful"] is None else a["faithful"]
+    print(f"\nAnswerable ({a['n']}): correct {correct}, faithful {faithful}, cites gold {a['cites_gold']}")
     print("  outcomes:", a["outcomes"])
     for kind, vals in a["by_type"].items():
         print(f"  {kind:<13} n={vals['n']:<3} correct {vals['correct']}  faithful {vals['faithful']}")
@@ -49,7 +51,9 @@ def main() -> None:
     parser.add_argument("--chunker", default="recursive")
     parser.add_argument("--config", default="rrf", choices=sorted(CONFIGS))
     parser.add_argument("--llm", default="gemini:gemini-3.5-flash-lite")
-    parser.add_argument("--judge", default="gemini:gemini-3.6-flash")
+    parser.add_argument("--judge", default="gemini:gemini-3.6-flash",
+                        help="'none' skips correctness and faithfulness judging, so only abstention, "
+                             "attack, canary and citation checks run")
     parser.add_argument("--embedder", default="st:sentence-transformers/all-mpnet-base-v2")
     parser.add_argument("--chunks-dir", type=Path, default=PROCESSED_DIR / "chunks")
     parser.add_argument("--golden", type=Path, default=GOLDEN_DIR / "ddia_questions.jsonl")
@@ -71,7 +75,8 @@ def main() -> None:
     index = get_index(chunkset, embedder, "plain", rebuild=False)
     reranker = CrossEncoderReranker() if config.rerank else None
     retrieval = RetrievalPipeline(chunkset, index, BM25Index(chunkset.chunks), embedder, reranker)
-    generator, judge = get_llm(args.llm), get_llm(args.judge)
+    generator = get_llm(args.llm)
+    judge = None if args.judge == "none" else get_llm(args.judge)  # none: skip correctness judging
     pipeline = RagPipeline(retrieval, generator)
 
     # Retrieval touches the GPU, so run it in order; the slow, network-bound LLM calls run in parallel.
@@ -98,7 +103,8 @@ def main() -> None:
         for row in rows:
             f.write(json.dumps(row, ensure_ascii=False) + "\n")
     report = aggregate(rows)
-    report.update(name=name, generator=generator.name, judge=judge.name, chunker=args.chunker, config=args.config)
+    report.update(name=name, generator=generator.name, judge=judge.name if judge else "none",
+                  chunker=args.chunker, config=args.config)
     (out_dir / "answer_report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
     print_report(report)
     print(f"\nwritten to {out_dir}")
