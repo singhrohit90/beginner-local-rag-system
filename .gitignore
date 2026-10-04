@@ -169,3 +169,4 @@ runs/
 !notebooks/*.pdf
 !uploaded_files/*.pdf
 .env
+data/golden/batch*.jsonl
