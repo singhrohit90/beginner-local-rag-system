@@ -1,7 +1,7 @@
 import pymupdf
 
 from rag.ingest.clean import clean_block, is_noise, normalize_key
-from rag.ingest.extract import extract_pages, load_pages, save_pages
+from rag.ingest.extract import extract_pages, extract_toc, load_pages, save_pages
 
 
 def make_pdf(path, n_pages=6):
@@ -17,7 +17,9 @@ def make_pdf(path, n_pages=6):
 
 
 def test_clean_block():
-    assert clean_block("exam-\nple of a  soft\nbreak") == "example of a soft break"
+    assert clean_block("exam‐\nple of a  soft\nbreak") == "example of a soft break"
+    assert clean_block("multi-\nmachine setups") == "multi-machine setups"  # real hyphen kept
+    assert clean_block("a read‐only copy") == "a read-only copy"
     assert clean_block("oﬃce ﬁle") == "office file"  # ligatures
     assert is_noise("  71 ") and is_noise("") and not is_noise("Chapter 3")
     assert normalize_key("Page 71 of 600") == normalize_key("page 72 of 600")
@@ -33,6 +35,36 @@ def test_extract_removes_running_header_and_page_numbers(tmp_path):
         assert str(page.page_no + 70) not in page.text.split()
         assert f"page {page.page_no} about SSTables" in page.text
         assert "LSM-trees" in page.text
+
+
+def test_running_footer_pattern_removed_even_when_text_never_repeats(tmp_path):
+    doc = pymupdf.open()
+    titles = ["Reliability", "Scalability", "Replication", "Partitioning", "Transactions"]
+    for i, title in enumerate(titles, start=1):
+        page = doc.new_page(width=595, height=842)
+        page.insert_text((72, 120), f"Body text number {i} about {title.lower()}.", fontsize=11)
+        footer = f"{title} | {i + 8}" if i % 2 else f"{i + 8} | Chapter {i}: {title}"
+        page.insert_text((72, 815), footer, fontsize=9)
+    path = tmp_path / "footers.pdf"
+    doc.save(path)
+    doc.close()
+    for i, page in enumerate(extract_pages(path), start=1):
+        assert "|" not in page.text
+        assert f"Body text number {i}" in page.text
+
+
+def test_toc_extracted(tmp_path):
+    doc = pymupdf.open()
+    for _ in range(3):
+        doc.new_page()
+    doc.set_toc([[1, "Chapter One", 1], [2, "Section A", 2]])
+    path = tmp_path / "toc.pdf"
+    doc.save(path)
+    doc.close()
+    assert extract_toc(path) == [
+        {"level": 1, "title": "Chapter One", "page": 1},
+        {"level": 2, "title": "Section A", "page": 2},
+    ]
 
 
 def test_pages_roundtrip(tmp_path):

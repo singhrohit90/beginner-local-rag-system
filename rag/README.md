@@ -26,7 +26,8 @@ Put the PDF in `data/raw/` (gitignored, do not commit it), then:
 
     python -m rag.ingest.extract data/raw/ddia.pdf
 
-This writes `data/processed/ddia.pages.jsonl`, one cleaned page per line. Page numbers are PDF
+This writes `data/processed/ddia.pages.jsonl`, one cleaned page per line, and `ddia.toc.json`, the
+PDF's own bookmarks (level, title, PDF page) for the heading-aware chunker. Page numbers are PDF
 page indexes (1-based), not the numbers printed on the page. Use the same numbering everywhere.
 
 Check the output by eye before trusting it: open the jsonl, read 10 pages from different

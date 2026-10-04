@@ -20,7 +20,7 @@ from rag.config import (
     PROCESSED_DIR,
     REPEAT_THRESHOLD,
 )
-from rag.ingest.clean import clean_block, is_noise, normalize_key
+from rag.ingest.clean import clean_block, is_noise, is_running_footer, normalize_key
 from rag.types import Page
 
 logger = logging.getLogger(__name__)
@@ -43,7 +43,8 @@ def _read_blocks(
             for x0, y0, x1, y1, text, _no, kind in page.get_text("blocks", sort=True):
                 if kind != 0:  # 0 = text, 1 = image
                     continue
-                in_margin = y1 <= height * header_fraction or y0 >= height * (
+                centre = (y0 + y1) / 2  # a footer can start a little above the zone edge
+                in_margin = centre <= height * header_fraction or centre >= height * (
                     1 - footer_fraction
                 )
                 blocks.append(_Block(text=text, in_margin=in_margin))
@@ -72,7 +73,9 @@ def build_pages(
             text = clean_block(block.text)
             if is_noise(text):
                 continue
-            if block.in_margin and normalize_key(text) in repeated:
+            if block.in_margin and (
+                normalize_key(text) in repeated or is_running_footer(text)
+            ):
                 continue
             kept.append(text)
         pages.append(Page(page_no=index, text="\n\n".join(kept)))
@@ -99,6 +102,15 @@ def save_pages(pages: List[Page], out_path: Path) -> None:
             f.write(json.dumps({"page_no": page.page_no, "text": page.text}) + "\n")
 
 
+def extract_toc(pdf_path: Path) -> List[dict]:
+    """The PDF's bookmarks as [{level, title, page}], page being the 1-based PDF index.
+
+    Used later by the heading-aware chunker and for section metadata. Empty if the PDF has none.
+    """
+    with pymupdf.open(Path(pdf_path)) as doc:
+        return [{"level": lv, "title": t, "page": p} for lv, t, p in doc.get_toc()]
+
+
 def load_pages(path: Path) -> List[Page]:
     with open(path, encoding="utf-8") as f:
         return [Page(**json.loads(line)) for line in f if line.strip()]
@@ -114,8 +126,12 @@ def main() -> None:
     out = args.out or PROCESSED_DIR / f"{args.pdf.stem}.pages.jsonl"
     pages = extract_pages(args.pdf)
     save_pages(pages, out)
+    toc = extract_toc(args.pdf)
+    toc_out = out.with_name(out.name.replace(".pages.jsonl", ".toc.json"))
+    toc_out.write_text(json.dumps(toc, indent=1), encoding="utf-8")
     words = sum(len(p.text.split()) for p in pages)
     print(f"{len(pages)} pages, {words} words -> {out}")
+    print(f"{len(toc)} bookmarks -> {toc_out}")
 
 
 if __name__ == "__main__":
