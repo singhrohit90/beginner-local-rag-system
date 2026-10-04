@@ -38,6 +38,9 @@ class GoldQuestion:
     must_not_contain: List[str] = field(default_factory=list)
     # Which authoring batch the question came from; see data/golden/BATCHES.md. 0 = unknown.
     batch: int = 0
+    # True when any one gold range is enough to answer (the passages repeat each other). The
+    # default, False, means every range is needed, as when two facts come from two places.
+    any_range: bool = False
 
     def validate(self) -> None:
         if self.type not in QUESTION_TYPES:

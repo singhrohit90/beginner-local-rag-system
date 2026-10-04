@@ -56,8 +56,14 @@ def score_answer(q: GoldQuestion, trace: Trace, judge: Optional[LLM]) -> Dict[st
 
     # Evidence-aware: a passage on the gold page that lacks the evidence text does not count.
     strict_context = strictify(context, q.evidence_terms)
-    gold_in_context = first_relevant_rank(strict_context, q.gold_pages) is not None
+    # Each gold range is a place the answer needs evidence from. Unless any one place is enough
+    # (q.any_range), every range must be in the context, otherwise the model had only half of
+    # the facts and a weak answer is a retrieval problem, not a generation problem.
+    covered = [first_relevant_rank(strict_context, [rng]) is not None for rng in q.gold_pages]
+    gold_in_context = any(covered) if q.any_range else all(covered)
     row["gold_in_context"] = gold_in_context
+    row["ranges_covered"] = covered
+    row["partial_evidence"] = any(covered) and not all(covered)
     row["gold_pages_in_context"] = first_relevant_rank(context, q.gold_pages) is not None
     row["cites_gold"] = any(
         1 <= n <= len(context) and is_relevant(strict_context[n - 1], q.gold_pages) for n in cited

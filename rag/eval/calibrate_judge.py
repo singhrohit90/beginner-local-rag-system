@@ -3,6 +3,7 @@
     python -m rag.eval.calibrate_judge --judge ollama:qwen2.5:7b
 
 correctness:   reference answer judged against its own question         -> should be CORRECT
+               reference plus an unrelated extra sentence               -> should be CORRECT
                another question's reference judged against this one     -> should be INCORRECT
 faithfulness:  reference answer with the gold pages as context          -> should be FAITHFUL
                the same answer with unrelated pages as context          -> should be UNFAITHFUL
@@ -54,6 +55,9 @@ def main() -> None:
         other = questions[(i + 1) % len(questions)]
         cases.append(("correct: own reference", True, q, q.reference_answer))
         cases.append(("correct: another question's reference", False, q, other.reference_answer))
+        # extra detail around the right answer must not be punished
+        padded = f"{q.reference_answer} Separately, {other.reference_answer}"
+        cases.append(("correct: reference plus extra detail", True, q, padded))
         cases.append(("faithful: gold pages as context", True, q, q.reference_answer))
         cases.append(("faithful: unrelated pages as context", False, q, q.reference_answer))
 

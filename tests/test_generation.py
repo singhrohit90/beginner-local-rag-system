@@ -116,6 +116,20 @@ def test_aggregate_summarises_by_type():
     assert report["answerable"]["by_type"]["factual"]["n"] == 1
 
 
+def test_multi_range_questions_need_every_range_in_context_unless_any_range():
+    judge = FakeLLM(lambda s, u: '{"correct": false, "reason": "r"}' if "Reference answer" in u
+                    else '{"faithful": true, "unsupported": []}')
+    two_places = GoldQuestion("m", "Q?", "multi_chunk", True, "ref", [(10, 10), (50, 50)])
+    only_first = trace_with("A partial answer [S1].", [10, 99], [1])
+    row = score_answer(two_places, only_first, judge)
+    assert row["ranges_covered"] == [True, False] and row["partial_evidence"]
+    assert row["outcome"] == "retrieval_fail"  # half the evidence was missing, not the model's fault
+    both = score_answer(two_places, trace_with("A partial answer [S1].", [10, 50], [1]), judge)
+    assert both["outcome"] == "generation_fail"  # all evidence present and still wrong
+    either = GoldQuestion("e", "Q?", "multi_chunk", True, "ref", [(10, 10), (50, 50)], any_range=True)
+    assert score_answer(either, only_first, judge)["outcome"] == "generation_fail"
+
+
 def test_unjudged_answers_do_not_produce_a_misleading_correct_rate():
     answered = score_answer(ANSWERABLE, trace_with("It is X [S1].", [10], [1]), None)
     refused = score_answer(GoldQuestion("b", "Q?", "factual", True, "ref", [(10, 10)]),

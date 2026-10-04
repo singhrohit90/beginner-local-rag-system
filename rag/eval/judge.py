@@ -20,9 +20,12 @@ from rag.llm import LLM
 from rag.types import Hit
 
 CORRECTNESS_SYSTEM = """You grade answers to questions about a book. You are given a question, a reference answer taken from the book, and a candidate answer.
-The candidate is correct if it states the key facts of the reference answer and does not contradict them. Different wording is fine and extra correct detail is fine.
-The candidate is incorrect if it misses a key fact, contradicts the reference, or says it cannot answer.
-Reply with JSON only, no other text: {"correct": true or false, "reason": "<one short sentence>"}"""
+Step 1: list the key facts in the reference answer.
+Step 2: check whether each key fact appears in the candidate, in any wording or order.
+The candidate is correct if every key fact appears and nothing in the candidate directly conflicts with a statement in the reference.
+Extra sentences, extra detail and a different structure are NOT a conflict. A statement that is merely absent from the reference is not a contradiction, so ignore it.
+The candidate is incorrect only if it leaves out a key fact, directly conflicts with the reference, or says it cannot answer.
+Reply with JSON only, no other text: {"correct": true or false, "reason": "<one short sentence naming the missing or conflicting fact, or saying all key facts are present>"}"""
 
 FAITHFULNESS_SYSTEM = """You check whether an answer is supported by the given passages. Consider only the passages, never outside knowledge, even if the answer is true in the real world.
 List the factual claims in the answer and check each against the passages. Citation labels such as [S1] are not claims.
