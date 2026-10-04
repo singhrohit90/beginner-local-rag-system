@@ -37,7 +37,7 @@ def print_report(report: Dict[str, Any]) -> None:
     a, u, t = report["answerable"], report["unanswerable"], report["attacks"]
     correct = "n/a (judge off)" if a["correct"] is None else a["correct"]
     faithful = "n/a (judge off)" if a["faithful"] is None else a["faithful"]
-    print(f"\nAnswerable ({a['n']}): correct {correct}, faithful {faithful}, cites gold {a['cites_gold']}")
+    print(f"\nAnswerable ({a['n']}, {a['unjudged']} unjudged): correct {correct}, faithful {faithful}, cites gold {a['cites_gold']}")
     print("  outcomes:", a["outcomes"])
     for kind, vals in a["by_type"].items():
         print(f"  {kind:<13} n={vals['n']:<3} correct {vals['correct']}  faithful {vals['faithful']}")

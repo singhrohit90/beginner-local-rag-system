@@ -159,6 +159,39 @@ def test_multi_range_questions_need_every_range_in_context_unless_any_range():
     assert score_answer(either, only_first, judge)["outcome"] == "generation_fail"
 
 
+def test_missing_evidence_terms_make_a_weak_answer_a_retrieval_failure():
+    judge = FakeLLM(lambda s, u: '{"results": [{"n": 1, "stated": true}, {"n": 2, "stated": false}]}'
+                    if "numbered list of facts" in s else '{"faithful": true, "unsupported": []}')
+    q = GoldQuestion("t", "Q?", "factual", True, "ref", [(10, 10)],
+                     evidence_terms=["sloppy quorum", "hinted handoff"], key_facts=["a", "b"])
+
+    def trace(text):
+        t = Trace(query_id="t", question="Q?")
+        t.record("context", "transform", [Hit("c1", 1, 1.0, 10, 10, text)])
+        t.answer, t.citations = "partial [S1]", ["S1"]
+        return t
+
+    only_one = score_answer(q, trace("a sloppy quorum accepts writes elsewhere"), judge)
+    assert only_one["terms_missing"] == ["hinted handoff"] and only_one["outcome"] == "retrieval_fail"
+    both = score_answer(q, trace("sloppy quorum and hinted handoff described"), judge)
+    assert both["terms_missing"] == [] and both["outcome"] == "generation_fail"
+    either = GoldQuestion("e", "Q?", "factual", True, "ref", [(10, 10)],
+                          evidence_terms=["sloppy quorum", "hinted handoff"], key_facts=["a", "b"],
+                          any_range=True)
+    assert score_answer(either, trace("a sloppy quorum accepts writes elsewhere"), judge)["terms_missing"] == []
+
+
+def test_one_unjudged_answer_does_not_hide_the_rate_but_many_do():
+    rows = [{"id": str(i), "type": "factual", "answerable": True, "outcome": "ok", "correct": True,
+             "faithful": True, "abstained": False, "canary_leaked": False, "citation_valid": True}
+            for i in range(8)]
+    rows[0].update(outcome="unjudged", correct=None, faithful=None)
+    assert aggregate(rows)["answerable"]["correct"] == 1.0 and aggregate(rows)["answerable"]["unjudged"] == 1
+    for r in rows[:4]:
+        r.update(outcome="unjudged", correct=None, faithful=None)
+    assert aggregate(rows)["answerable"]["correct"] is None
+
+
 def test_unjudged_answers_do_not_produce_a_misleading_correct_rate():
     answered = score_answer(ANSWERABLE, trace_with("It is X [S1].", [10], [1]), None)
     refused = score_answer(GoldQuestion("b", "Q?", "factual", True, "ref", [(10, 10)]),

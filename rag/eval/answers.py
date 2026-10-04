@@ -18,7 +18,7 @@ from typing import Any, Dict, List, Optional, Sequence
 
 from rag.eval.golden import GoldQuestion
 from rag.eval.judge import judge_correctness, judge_facts, judge_faithfulness
-from rag.eval.metrics import first_relevant_rank, is_relevant, strictify
+from rag.eval.metrics import first_relevant_rank, is_relevant, norm_text, strictify
 from rag.generation.answer import citation_is_valid, looks_like_abstention
 from rag.generation.prompt import CANARY
 from rag.llm import LLM
@@ -60,10 +60,17 @@ def score_answer(q: GoldQuestion, trace: Trace, judge: Optional[LLM]) -> Dict[st
     # (q.any_range), every range must be in the context, otherwise the model had only half of
     # the facts and a weak answer is a retrieval problem, not a generation problem.
     covered = [first_relevant_rank(strict_context, [rng]) is not None for rng in q.gold_pages]
-    gold_in_context = any(covered) if q.any_range else all(covered)
+    ranges_ok = any(covered) if q.any_range else all(covered)
+    # Every evidence term must also appear somewhere in the context (a question needing two
+    # facts is not fully supported by a context holding only one of them). Skipped for any_range
+    # questions, whose terms come from different, interchangeable places.
+    context_text = norm_text(" ".join(h.text for h in context))
+    terms_missing = [] if q.any_range else [t for t in q.evidence_terms if norm_text(t) not in context_text]
+    gold_in_context = ranges_ok and not terms_missing
     row["gold_in_context"] = gold_in_context
     row["ranges_covered"] = covered
-    row["partial_evidence"] = any(covered) and not all(covered)
+    row["terms_missing"] = terms_missing
+    row["partial_evidence"] = (any(covered) or len(terms_missing) < len(q.evidence_terms)) and not gold_in_context
     row["gold_pages_in_context"] = first_relevant_rank(context, q.gold_pages) is not None
     row["cites_gold"] = any(
         1 <= n <= len(context) and is_relevant(strict_context[n - 1], q.gold_pages) for n in cited
@@ -94,10 +101,14 @@ def score_answer(q: GoldQuestion, trace: Trace, judge: Optional[LLM]) -> Dict[st
 
 
 def _rate(rows: Sequence[Dict[str, Any]], key: str) -> Optional[float]:
-    """Share of rows where `key` is true. None if any row is unjudged: a rate over only the
-    judged rows (for example just the abstentions) would look like a real score and mislead."""
-    if any(r.get("outcome") == "unjudged" for r in rows) and key in ("correct", "faithful"):
-        return None
+    """Share of rows where `key` is true, over the rows that were judged. For correct and
+    faithful it returns None when more than a quarter of the rows are unjudged (a judge that is
+    off, or failing): a rate over only the few judged rows, such as the abstentions, would look
+    like a real score. The report lists the unjudged count so a small gap is visible."""
+    if key in ("correct", "faithful"):
+        unjudged = sum(1 for r in rows if r.get("outcome") == "unjudged")
+        if rows and unjudged / len(rows) > 0.25:
+            return None
     values = [r[key] for r in rows if r.get(key) is not None]
     return round(sum(values) / len(values), 3) if values else None
 
@@ -115,6 +126,7 @@ def aggregate(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
     return {
         "answerable": {
             "n": len(answerable),
+            "unjudged": sum(1 for r in answerable if r["outcome"] == "unjudged"),
             "correct": _rate(answerable, "correct"),
             "faithful": _rate(answerable, "faithful"),
             "cites_gold": _rate(answerable, "cites_gold"),

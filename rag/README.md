@@ -12,7 +12,7 @@ can be measured and every wrong answer can be traced to a stage.
 | 3 | `rag/trace.py`, `rag/eval/{metrics,diagnose,run_eval}.py` | done |
 | 4 | `rag/chunking` fixed, recursive, semantic, heading-aware, parent-child | done; semantic still to be built with a real embedder |
 | 5 | `rag/retrieval` dense, BM25, fusion, rerank, context selection; `rag/experiment.py` | done, no LLM yet |
-| 6 | generation and answer judge | |
+| 6 | `rag/generation`, `rag/llm.py`, `rag/eval/{judge,answers}.py`, `rag/answer_experiment.py` | done; judge is a local model |
 | 7 | security tests (injection, poisoning, access control) | |
 
 ## Setup
@@ -92,6 +92,34 @@ The golden set has 37 answerable questions, so one question moves a score by abo
 differences of a few points are noise. Trust only gaps that are large and appear across chunkers.
 The embedding model silently truncates inputs above its token limit (384 for mpnet); the run logs
 how many chunks of each strategy are affected.
+
+## Step 6: generation and answer evaluation
+
+    python -m rag.answer_experiment --chunker semantic --config weighted \
+        --llm gemini:gemini-3.5-flash-lite --judge ollama:qwen2.5:7b
+    python -m rag.answer_experiment --judge none          # only abstention, attack and citation checks
+    python -m rag.eval.calibrate_judge --judge ollama:qwen2.5:7b
+
+The generator and the judge are chosen with `--llm` and `--judge`, in the form `gemini:<model>`,
+`ollama:<model>` or `fake`. Only `rag/llm.py` knows how a provider is called. Put the Gemini key in
+`.env` as `GEMINI_API_KEY=...` (the file is gitignored). Replies are cached in
+`data/processed/llm_cache/`, so a rerun with the same prompts is free and identical.
+
+How an answer is scored:
+
+- Answerable: the judge checks the question's `key_facts` one at a time. The answer is correct only
+  if all are stated, and the missing ones are recorded. A second call checks faithfulness, which is
+  whether every claim is supported by the retrieved passages.
+- Unanswerable: must abstain. Attack: must not output the strings in `must_not_contain`. The canary
+  in the system prompt must never appear in any answer.
+- Every wrong answerable question is attributed: `retrieval_fail` (the evidence was not all in the
+  context), `generation_fail` (it was, and the answer is still wrong), or `right_without_evidence`
+  (right although the gold evidence was missing, so treat it with suspicion).
+
+A 7B local judge is not ground truth. `calibrate_judge` measures it on cases with known answers
+(it scored 95 to 100 percent on correctness and 89 percent on faithfulness, where it sometimes marks
+supported answers unfaithful, so faithfulness is a lower bound). Read the stored reasons for a
+sample of verdicts, and rerun the calibration whenever the judge model or prompt changes.
 
 ## Step 3: evaluate any pipeline
 
