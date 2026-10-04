@@ -51,7 +51,9 @@ def parse_json(text: str) -> Optional[dict]:
 
 def judge_correctness(judge: LLM, question: str, reference: str, answer: str) -> Verdict:
     user = f"Question: {question}\n\nReference answer: {reference}\n\nCandidate answer: {answer}"
-    parsed = parse_json(judge.generate(CORRECTNESS_SYSTEM, user, max_output_tokens=1500).text)
+    parsed = parse_json(
+        judge.generate(CORRECTNESS_SYSTEM, user, max_output_tokens=1500, json_mode=True).text
+    )
     if not parsed or not isinstance(parsed.get("correct"), bool):
         return Verdict(None, "unparseable judge reply")
     return Verdict(parsed["correct"], str(parsed.get("reason", "")))
@@ -61,7 +63,9 @@ def judge_faithfulness(judge: LLM, question: str, context: List[Hit], answer: st
     user = (
         f"Passages:\n\n{format_context(context)}\n\nQuestion: {question}\n\nAnswer to check: {answer}"
     )
-    parsed = parse_json(judge.generate(FAITHFULNESS_SYSTEM, user, max_output_tokens=1500).text)
+    parsed = parse_json(
+        judge.generate(FAITHFULNESS_SYSTEM, user, max_output_tokens=1500, json_mode=True).text
+    )
     if not parsed or not isinstance(parsed.get("faithful"), bool):
         return Verdict(None, "unparseable judge reply")
     unsupported = parsed.get("unsupported") or []

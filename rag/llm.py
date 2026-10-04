@@ -1,16 +1,20 @@
 """The LLM behind one small interface, so the pipeline never knows which provider answers.
 
-    get_llm("gemini:gemini-2.5-flash")    Google Gemini API, key from GEMINI_API_KEY
-    get_llm("fake")                       canned replies, for tests
+    get_llm("gemini:gemini-3.5-flash-lite")   Google Gemini API, key from GEMINI_API_KEY
+    get_llm("ollama:qwen2.5:7b")               a local model served by Ollama, no key
+    get_llm("fake")                            canned replies, for tests
 
-To add another provider (a local Ollama model, Claude), write a class with a `generate` method and
-register it in get_llm. Retrieval, prompts and evaluation do not change.
+To add another provider (Claude, OpenAI), write a class with a `generate` method that returns an
+LLMResult and register it in get_llm. Retrieval, prompts and evaluation do not change, because
+this file is the only place that knows how a provider's request and response look.
 """
 
 import hashlib
 import json
 import logging
 import time
+import urllib.error
+import urllib.request
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Callable, List, Optional, Protocol
@@ -32,7 +36,12 @@ class LLMResult:
 class LLM(Protocol):
     name: str
 
-    def generate(self, system: str, user: str, max_output_tokens: int = 1024) -> LLMResult: ...
+    def generate(
+        self, system: str, user: str, max_output_tokens: int = 1024, json_mode: bool = False
+    ) -> LLMResult:
+        """json_mode asks the provider to return valid JSON only. Not every model honours it,
+        so callers still parse defensively."""
+        ...
 
 
 class GeminiLLM:
@@ -47,13 +56,16 @@ class GeminiLLM:
         self._retries = retries
         self._client = genai.Client(api_key=require("GEMINI_API_KEY"))
 
-    def generate(self, system: str, user: str, max_output_tokens: int = 1024) -> LLMResult:
+    def generate(
+        self, system: str, user: str, max_output_tokens: int = 1024, json_mode: bool = False
+    ) -> LLMResult:
         from google.genai import errors, types
 
         config = types.GenerateContentConfig(
             system_instruction=system,
             temperature=0.0,
             max_output_tokens=max_output_tokens,
+            response_mime_type="application/json" if json_mode else None,
         )
         delay = 2.0
         for attempt in range(self._retries + 1):
@@ -79,6 +91,61 @@ class GeminiLLM:
         raise RuntimeError("unreachable")
 
 
+class OllamaLLM:
+    """A model served by a local Ollama server (http://localhost:11434). No key, no quota, and
+    nothing leaves the machine. Quality depends on the model: a 7B model grades and answers less
+    reliably than a hosted one, so check its output before trusting it as a judge."""
+
+    def __init__(
+        self,
+        model: str,
+        host: str = "http://localhost:11434",
+        num_ctx: int = 8192,
+        timeout: float = 600.0,
+    ):
+        self.name = f"ollama:{model}"
+        self._model = model
+        self._url = host.rstrip("/") + "/api/chat"
+        self._num_ctx = num_ctx
+        self._timeout = timeout
+
+    def generate(
+        self, system: str, user: str, max_output_tokens: int = 1024, json_mode: bool = False
+    ) -> LLMResult:
+        payload = {
+            "model": self._model,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+            "stream": False,
+            "options": {
+                "temperature": 0.0,
+                "num_ctx": self._num_ctx,
+                "num_predict": max_output_tokens,
+            },
+        }
+        if json_mode:
+            payload["format"] = "json"
+        request = urllib.request.Request(
+            self._url, json.dumps(payload).encode(), {"Content-Type": "application/json"}
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=self._timeout) as response:
+                body = json.loads(response.read())
+        except urllib.error.URLError as err:
+            raise RuntimeError(
+                f"cannot reach Ollama at {self._url} ({err.reason}). Is `ollama serve` running "
+                f"and is the model pulled (`ollama pull {self._model}`)?"
+            ) from err
+        return LLMResult(
+            text=(body.get("message", {}).get("content") or "").strip(),
+            prompt_tokens=int(body.get("prompt_eval_count", 0) or 0),
+            output_tokens=int(body.get("eval_count", 0) or 0),
+            finish_reason=str(body.get("done_reason", "")),
+        )
+
+
 class FakeLLM:
     """Returns replies from a function, so tests can script the model."""
 
@@ -87,7 +154,9 @@ class FakeLLM:
         self._reply = reply
         self.calls: List[tuple] = []
 
-    def generate(self, system: str, user: str, max_output_tokens: int = 1024) -> LLMResult:
+    def generate(
+        self, system: str, user: str, max_output_tokens: int = 1024, json_mode: bool = False
+    ) -> LLMResult:
         self.calls.append((system, user))
         return LLMResult(text=self._reply(system, user))
 
@@ -104,14 +173,17 @@ class CachedLLM:
         self._dir = directory
         self._dir.mkdir(parents=True, exist_ok=True)
 
-    def generate(self, system: str, user: str, max_output_tokens: int = 1024) -> LLMResult:
-        key = hashlib.sha256(
-            json.dumps([self.name, system, user, max_output_tokens]).encode()
-        ).hexdigest()
+    def generate(
+        self, system: str, user: str, max_output_tokens: int = 1024, json_mode: bool = False
+    ) -> LLMResult:
+        parts = [self.name, system, user, max_output_tokens]
+        if json_mode:
+            parts.append("json")  # only added when set, so older cache entries stay valid
+        key = hashlib.sha256(json.dumps(parts).encode()).hexdigest()
         path = self._dir / f"{key}.json"
         if path.exists():
             return LLMResult(**json.loads(path.read_text(encoding="utf-8")))
-        result = self._inner.generate(system, user, max_output_tokens)
+        result = self._inner.generate(system, user, max_output_tokens, json_mode)
         path.write_text(json.dumps(asdict(result)), encoding="utf-8")
         return result
 
@@ -121,5 +193,8 @@ def get_llm(spec: str, cache_dir: Optional[Path] = PROCESSED_DIR / "llm_cache") 
         return FakeLLM()
     if spec.startswith("gemini:"):
         llm: LLM = GeminiLLM(spec.split(":", 1)[1])
-        return CachedLLM(llm, cache_dir) if cache_dir else llm
-    raise ValueError(f"unknown llm {spec!r}; use 'gemini:<model>' or 'fake'")
+    elif spec.startswith("ollama:"):
+        llm = OllamaLLM(spec.split(":", 1)[1])
+    else:
+        raise ValueError(f"unknown llm {spec!r}; use 'gemini:<model>', 'ollama:<model>' or 'fake'")
+    return CachedLLM(llm, cache_dir) if cache_dir else llm
