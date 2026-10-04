@@ -59,6 +59,35 @@ def test_judges_return_verdicts_and_handle_garbage():
     assert "ref" not in faithful.calls[0][1].replace("Reference", "")
 
 
+def test_fact_checklist_judge_requires_every_fact_and_names_the_missing_ones():
+    from rag.eval.judge import judge_facts
+
+    facts = ["fact one", "fact two"]
+    all_yes = FakeLLM(lambda s, u: '{"results": [{"n": 1, "stated": true}, {"n": 2, "stated": true}]}')
+    verdict = judge_facts(all_yes, "answer", facts)
+    assert verdict.correct is True and verdict.missing == []
+    one_no = FakeLLM(lambda s, u: '{"results": [{"n": 1, "stated": true}, {"n": 2, "stated": false}]}')
+    verdict = judge_facts(one_no, "answer", facts)
+    assert verdict.correct is False and verdict.missing == ["fact two"]
+    assert "1. fact one" in one_no.calls[0][1] and "2. fact two" in one_no.calls[0][1]
+    wrong_length = FakeLLM(lambda s, u: '{"results": [{"n": 1, "stated": true}]}')
+    assert judge_facts(wrong_length, "answer", facts).correct is None
+    assert judge_facts(FakeLLM(lambda s, u: "nonsense"), "answer", facts).correct is None
+
+
+def test_answer_scoring_uses_the_fact_checklist_when_a_question_has_one():
+    def reply(system, user):
+        if "numbered list of facts" in system:
+            return '{"results": [{"n": 1, "stated": true}, {"n": 2, "stated": false}]}'
+        return '{"faithful": true, "unsupported": []}'
+
+    q = GoldQuestion("f", "Q?", "factual", True, "ref", [(10, 10)],
+                     key_facts=["first fact", "second fact"])
+    row = score_answer(q, trace_with("Only the first [S1].", [10], [1]), FakeLLM(reply))
+    assert row["correct"] is False and row["facts_stated"] == [True, False]
+    assert "second fact" in row["why_correct"] and row["outcome"] == "generation_fail"
+
+
 def trace_with(answer, context_pages, citations=()):
     t = Trace(query_id="q", question="Q?")
     t.record("context", "transform", [hit(p, rank=i) for i, p in enumerate(context_pages, 1)])

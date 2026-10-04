@@ -62,6 +62,39 @@ def judge_correctness(judge: LLM, question: str, reference: str, answer: str) ->
     return Verdict(parsed["correct"], str(parsed.get("reason", "")))
 
 
+FACTS_SYSTEM = """You check whether an answer states specific facts. You are given an answer and a numbered list of facts.
+For each fact, decide whether the answer clearly states it, in any wording. A fact the answer omits, or contradicts, is not stated.
+Ignore everything in the answer that is not related to a listed fact: extra sentences, extra detail and a different order never make a fact false.
+Reply with JSON only, no other text, in this form, with one entry per fact in order:
+{"results": [{"n": 1, "stated": true, "quote": "<short quote from the answer, or empty>"}, ...]}"""
+
+
+@dataclass
+class FactVerdict:
+    stated: List[Optional[bool]]  # one per fact; None when the reply could not be parsed
+    missing: List[str]
+
+    @property
+    def correct(self) -> Optional[bool]:
+        if not self.stated or any(s is None for s in self.stated):
+            return None
+        return all(self.stated)
+
+
+def judge_facts(judge: LLM, answer: str, facts: List[str]) -> FactVerdict:
+    numbered = "\n".join(f"{i}. {fact}" for i, fact in enumerate(facts, start=1))
+    user = f"Facts:\n{numbered}\n\nAnswer:\n{answer}"
+    parsed = parse_json(judge.generate(FACTS_SYSTEM, user, max_output_tokens=1500, json_mode=True).text)
+    results = parsed.get("results") if parsed else None
+    if not isinstance(results, list) or len(results) != len(facts):
+        return FactVerdict([None] * len(facts), [])
+    stated: List[Optional[bool]] = []
+    for item in results:
+        value = item.get("stated") if isinstance(item, dict) else None
+        stated.append(value if isinstance(value, bool) else None)
+    return FactVerdict(stated, [f for f, s in zip(facts, stated) if s is False])
+
+
 def judge_faithfulness(judge: LLM, question: str, context: List[Hit], answer: str) -> Verdict:
     user = (
         f"Passages:\n\n{format_context(context)}\n\nQuestion: {question}\n\nAnswer to check: {answer}"

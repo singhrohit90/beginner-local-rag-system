@@ -41,6 +41,9 @@ class GoldQuestion:
     # True when any one gold range is enough to answer (the passages repeat each other). The
     # default, False, means every range is needed, as when two facts come from two places.
     any_range: bool = False
+    # The facts a correct answer must state, each short and self-contained. The judge checks them
+    # one by one, which a small model does far more reliably than judging the whole answer.
+    key_facts: List[str] = field(default_factory=list)
 
     def validate(self) -> None:
         if self.type not in QUESTION_TYPES:

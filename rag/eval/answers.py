@@ -17,7 +17,7 @@ from collections import Counter, defaultdict
 from typing import Any, Dict, List, Optional, Sequence
 
 from rag.eval.golden import GoldQuestion
-from rag.eval.judge import judge_correctness, judge_faithfulness
+from rag.eval.judge import judge_correctness, judge_facts, judge_faithfulness
 from rag.eval.metrics import first_relevant_rank, is_relevant, strictify
 from rag.generation.answer import citation_is_valid, looks_like_abstention
 from rag.generation.prompt import CANARY
@@ -73,9 +73,15 @@ def score_answer(q: GoldQuestion, trace: Trace, judge: Optional[LLM]) -> Dict[st
     elif judge is None:
         correct, faithful, reasons = None, None, ("", "")
     else:
-        c = judge_correctness(judge, q.question, q.reference_answer, answer)
+        if q.key_facts:  # fact checklist: robust for small judges, and shows what was missed
+            facts = judge_facts(judge, answer, q.key_facts)
+            correct, why = facts.correct, "missing: " + "; ".join(facts.missing) if facts.missing else ""
+            row["facts_stated"] = facts.stated
+        else:
+            c = judge_correctness(judge, q.question, q.reference_answer, answer)
+            correct, why = c.value, c.reason
         f = judge_faithfulness(judge, q.question, context, answer)
-        correct, faithful, reasons = c.value, f.value, (c.reason, f.reason)
+        faithful, reasons = f.value, (why, f.reason)
     row.update(correct=correct, faithful=faithful, why_correct=reasons[0], why_unfaithful=reasons[1])
 
     if correct is None:

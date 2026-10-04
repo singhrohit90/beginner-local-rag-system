@@ -20,7 +20,7 @@ from typing import Dict, List, Tuple
 
 from rag.config import GOLDEN_DIR, PROCESSED_DIR
 from rag.eval.golden import GoldQuestion, load_golden
-from rag.eval.judge import judge_correctness, judge_faithfulness
+from rag.eval.judge import judge_correctness, judge_facts, judge_faithfulness
 from rag.ingest.extract import load_pages
 from rag.llm import get_llm
 from rag.log import setup_logging
@@ -58,11 +58,17 @@ def main() -> None:
         # extra detail around the right answer must not be punished
         padded = f"{q.reference_answer} Separately, {other.reference_answer}"
         cases.append(("correct: reference plus extra detail", True, q, padded))
+        # the fact-checklist method, which is what the answer evaluation now uses
+        cases.append(("facts: own reference", True, q, q.reference_answer))
+        cases.append(("facts: reference plus extra detail", True, q, padded))
+        cases.append(("facts: another question's reference", False, q, other.reference_answer))
         cases.append(("faithful: gold pages as context", True, q, q.reference_answer))
         cases.append(("faithful: unrelated pages as context", False, q, q.reference_answer))
 
     def run(case: Tuple[str, bool, GoldQuestion, str]):
         group, expected, q, answer = case
+        if group.startswith("facts"):
+            return judge_facts(judge, answer, q.key_facts)  # has .correct like a verdict's .value
         if group.startswith("correct"):
             return judge_correctness(judge, q.question, q.reference_answer, answer)
         start, end = q.gold_pages[0]
@@ -78,7 +84,8 @@ def main() -> None:
 
     groups: Dict[str, List[Tuple[bool, object]]] = {}
     for (group, expected, q, _), verdict in zip(cases, verdicts):
-        groups.setdefault(group, []).append((expected, verdict.value))
+        value = verdict.correct if group.startswith("facts") else verdict.value
+        groups.setdefault(group, []).append((expected, value))
     print(f"\njudge: {judge.name}   questions: {len(questions)}")
     for group, rows in groups.items():
         right = sum(1 for expected, value in rows if value is expected)
