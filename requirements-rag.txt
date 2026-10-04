@@ -1,2 +1,5 @@
 pymupdf>=1.24
+numpy>=1.26
 pytest>=8
+# optional, only for semantic chunking and local embeddings:
+# sentence-transformers

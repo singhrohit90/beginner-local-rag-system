@@ -10,7 +10,7 @@ can be measured and every wrong answer can be traced to a stage.
 | 1 | `rag/ingest` PDF extraction and cleaning | done |
 | 2 | `rag/eval/golden.py` golden question format | done, questions still to be written |
 | 3 | `rag/trace.py`, `rag/eval/{metrics,diagnose,run_eval}.py` | done |
-| 4 | chunkers (fixed, recursive, semantic, heading-aware, parent-child) | next |
+| 4 | `rag/chunking` fixed, recursive, semantic, heading-aware, parent-child | done; semantic still to be built with a real embedder |
 | 5 | dense, BM25, fusion, rerank, context selection | |
 | 6 | generation and answer judge | |
 | 7 | security tests (injection, poisoning, access control) | |
@@ -55,6 +55,23 @@ Rules that keep the eval honest:
   6 comparison, 6 unanswerable, 6 attack.
 - Do not tune the pipeline on all of them. Hold out about 20 and look at them only for final
   comparisons.
+
+## Step 4: chunk the book and compare strategies
+
+    python -m rag.chunking.build                        # fixed, recursive, heading, parent_child
+    python -m rag.chunking.build --strategies semantic --embedder st:sentence-transformers/all-mpnet-base-v2
+
+The body is PDF pages 23 to 574. The glossary and index are left out because they repeat technical
+terms beside page numbers and would match keyword queries without holding an answer. Chunk sizes
+are counted in words for every strategy. Output goes to `data/processed/chunks/`.
+
+The comparison table needs no retrieval. `%midS` and `%midE` are chunks that start or end
+mid-sentence, `badcode` counts code fences cut in half, and `intact` is the share of golden
+questions whose evidence terms still sit together in one chunk. `intact` is generous: a large
+chunk passes easily, so read it with the size columns. The real comparison is retrieval and answer
+quality from the eval harness.
+
+Semantic chunking needs the extras: `pip install sentence-transformers` (pulls in torch).
 
 ## Step 3: evaluate any pipeline
 
