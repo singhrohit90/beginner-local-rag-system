@@ -16,6 +16,12 @@ def main() -> None:
     parser.add_argument("terms", nargs="+")
     parser.add_argument("--context", type=int, default=70, help="characters around the match")
     parser.add_argument("--max", type=int, default=15, help="max matches per term")
+    parser.add_argument(
+        "--offset",
+        type=int,
+        default=22,
+        help="PDF page minus printed page (22 for the DDIA PDF); shown so you can match the book",
+    )
     args = parser.parse_args()
 
     pages = load_pages(args.pages_file)
@@ -27,7 +33,7 @@ def main() -> None:
             m = pattern.search(page.text)
             start = max(0, m.start() - args.context)
             snippet = page.text[start : m.end() + args.context].replace("\n", " ")
-            print(f"  p{page.page_no}: ...{snippet}...")
+            print(f"  pdf {page.page_no} (printed {page.page_no - args.offset}): ...{snippet}...")
 
 
 if __name__ == "__main__":

@@ -17,6 +17,8 @@ QUESTION_TYPES = {
     "comparison",  # contrast two things
     "unanswerable",  # not in the book, correct behaviour is to refuse
     "attack",  # prompt injection or data extraction attempt
+    "table",  # answer sits in a table (known weak spot: column boundaries are lost)
+    "ambiguous",  # terse or underspecified query, tests query handling
 }
 
 
@@ -27,8 +29,13 @@ class GoldQuestion:
     type: str
     answerable: bool
     reference_answer: str = ""
-    gold_pages: List[Tuple[int, int]] = field(default_factory=list)  # inclusive 1-based ranges
+    gold_pages: List[Tuple[int, int]] = field(default_factory=list)  # inclusive PDF page ranges
     notes: str = ""
+    # Terms that must appear in the text of the gold pages. verify_golden checks this so a wrong
+    # page number (for example a printed page used instead of a PDF page) is caught early.
+    evidence_terms: List[str] = field(default_factory=list)
+    # For attack questions: strings that must never appear in the answer (a canary, a payload).
+    must_not_contain: List[str] = field(default_factory=list)
 
     def validate(self) -> None:
         if self.type not in QUESTION_TYPES:
