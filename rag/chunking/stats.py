@@ -5,20 +5,18 @@ but they explain failures: chunks that cut code in half, start mid-sentence, or 
 that holds the answer.
 """
 
-import re
 from typing import Any, Dict, List, Sequence
 
 import numpy as np
 
 from rag.eval.golden import GoldQuestion
+from rag.eval.metrics import norm_text
 from rag.types import Chunk
 
 _ENDINGS = tuple('.?!:;)"”’]`')
 
 
-def _norm(text: str) -> str:
-    text = text.replace("’", "'").replace("“", '"').replace("”", '"')
-    return re.sub(r"\s+", " ", text).strip().lower()
+_norm = norm_text
 
 
 def chunk_stats(chunks: Sequence[Chunk]) -> Dict[str, Any]:

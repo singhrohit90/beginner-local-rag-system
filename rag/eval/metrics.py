@@ -6,11 +6,47 @@ inflate recall or push nDCG above 1.
 """
 
 import math
+import re
+from dataclasses import replace
 from typing import Dict, List, Optional, Sequence, Tuple
 
+from rag.trace import StageRecord, Trace
 from rag.types import Hit
 
 PageRange = Tuple[int, int]
+
+
+def norm_text(text: str) -> str:
+    """Lowercase, straight quotes, single spaces: so code spacing and curly quotes never matter."""
+    text = text.replace("’", "'").replace("“", '"').replace("”", '"')
+    return re.sub(r"\s+", " ", text).strip().lower()
+
+
+def strictify(hits: Sequence[Hit], terms: Sequence[str]) -> List[Hit]:
+    """Evidence-aware relevance. A hit that overlaps a gold page but does not contain any of the
+    evidence terms is moved to page 0, so it can no longer count as relevant. Ranks are unchanged.
+
+    Page overlap alone is generous: a 200-word chunk that merely shares a page with the answer
+    scores as a hit even when the answer sentence is in the neighbouring chunk. With no terms to
+    check, hits are returned untouched.
+    """
+    if not terms:
+        return list(hits)
+    needles = [norm_text(t) for t in terms]
+    kept = []
+    for hit in hits:
+        body = norm_text(hit.text)
+        kept.append(hit if any(n in body for n in needles) else replace(hit, page_start=0, page_end=0))
+    return kept
+
+
+def strict_trace(trace: Trace, terms: Sequence[str]) -> Trace:
+    """A copy of the trace whose hits have been passed through strictify."""
+    stages = [
+        StageRecord(s.name, s.kind, strictify(s.hits, terms), s.elapsed_ms, s.meta)
+        for s in trace.stages
+    ]
+    return replace(trace, stages=stages)
 
 
 def overlaps(hit: Hit, gold: PageRange) -> bool:

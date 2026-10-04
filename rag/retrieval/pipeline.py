@@ -55,7 +55,7 @@ class RetrievalPipeline:
         self.embedder = embedder
         self.reranker = reranker
 
-    def _hits(self, scored: Sequence[Tuple[int, float]], keep_text: bool = False) -> List[Hit]:
+    def _hits(self, scored: Sequence[Tuple[int, float]], keep_text: bool = True) -> List[Hit]:
         return [
             hit_from_chunk(self.chunks[row], rank, score, keep_text)
             for rank, (row, score) in enumerate(scored, start=1)

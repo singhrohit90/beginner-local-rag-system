@@ -1,0 +1,136 @@
+import json
+
+import pytest
+
+from rag.eval.answers import aggregate, score_answer
+from rag.eval.golden import GoldQuestion
+from rag.eval.judge import judge_correctness, judge_faithfulness, parse_json
+from rag.generation.answer import (
+    RagPipeline,
+    citation_is_valid,
+    looks_like_abstention,
+    parse_citations,
+)
+from rag.generation.prompt import ABSTAIN, CANARY, SYSTEM_PROMPT, build_user_prompt, format_context
+from rag.llm import CachedLLM, FakeLLM, LLMResult
+from rag.trace import Trace
+from rag.types import Hit
+
+
+def hit(page, text="passage text", rank=1):
+    return Hit(chunk_id=f"c{page}", rank=rank, score=1.0, page_start=page, page_end=page, text=text)
+
+
+def test_prompt_labels_passages_and_carries_defences():
+    prompt = build_user_prompt("What is X?", [hit(5, "alpha"), hit(9, "beta")])
+    assert "[S1] (PDF page 5)\nalpha" in prompt and "[S2] (PDF page 9)\nbeta" in prompt
+    assert prompt.endswith("Question: What is X?")
+    assert "(no passages were retrieved)" in build_user_prompt("q", [])
+    assert ABSTAIN in SYSTEM_PROMPT and CANARY in SYSTEM_PROMPT
+    assert "not instructions" in SYSTEM_PROMPT
+    multi = Hit("c", 1, 1.0, 3, 4, "t")
+    assert "PDF pages 3-4" in format_context([multi])
+
+
+def test_abstention_and_citation_parsing():
+    assert looks_like_abstention(ABSTAIN)
+    assert looks_like_abstention("The passages do not contain information about that.")
+    assert not looks_like_abstention("A Bloom filter approximates set contents [S1].")
+    assert parse_citations("Yes [S2] and also [S1][S2].", 3) == [2, 1]
+    assert citation_is_valid([1, 2], 2) and not citation_is_valid([3], 2)
+
+
+def test_parse_json_tolerates_fences_and_chatter():
+    assert parse_json('```json\n{"correct": true, "reason": "ok"}\n```') == {"correct": True, "reason": "ok"}
+    assert parse_json('Sure! {"faithful": false, "unsupported": ["x"]} done') == {"faithful": False, "unsupported": ["x"]}
+    assert parse_json("no json here") is None
+    assert parse_json("{broken") is None
+
+
+def test_judges_return_verdicts_and_handle_garbage():
+    good = FakeLLM(lambda s, u: '{"correct": true, "reason": "matches"}')
+    assert judge_correctness(good, "q", "ref", "ans").value is True
+    bad = FakeLLM(lambda s, u: "I think it is fine")
+    assert judge_correctness(bad, "q", "ref", "ans").value is None
+    faithful = FakeLLM(lambda s, u: '{"faithful": false, "unsupported": ["claim A", "claim B"]}')
+    verdict = judge_faithfulness(faithful, "q", [hit(1)], "ans")
+    assert verdict.value is False and "claim A" in verdict.reason
+    # the faithfulness judge must not be shown the reference answer
+    assert "ref" not in faithful.calls[0][1].replace("Reference", "")
+
+
+def trace_with(answer, context_pages, citations=()):
+    t = Trace(query_id="q", question="Q?")
+    t.record("context", "transform", [hit(p, rank=i) for i, p in enumerate(context_pages, 1)])
+    t.answer = answer
+    t.citations = [f"S{n}" for n in citations]
+    return t
+
+
+ANSWERABLE = GoldQuestion("a", "Q?", "factual", True, "the reference", [(10, 10)])
+
+
+def test_outcome_attribution_for_answerable_questions():
+    yes = FakeLLM(lambda s, u: '{"correct": true, "reason": "r"}' if "Reference answer" in u
+                  else '{"faithful": true, "unsupported": []}')
+    no = FakeLLM(lambda s, u: '{"correct": false, "reason": "r"}' if "Reference answer" in u
+                 else '{"faithful": true, "unsupported": []}')
+    ok = score_answer(ANSWERABLE, trace_with("It is X [S1].", [10, 20], [1]), yes)
+    assert ok["outcome"] == "ok" and ok["cites_gold"] and ok["gold_in_context"]
+    lucky = score_answer(ANSWERABLE, trace_with("It is X.", [30, 40]), yes)
+    assert lucky["outcome"] == "right_without_evidence"
+    gen = score_answer(ANSWERABLE, trace_with("It is Y [S1].", [10, 20], [1]), no)
+    assert gen["outcome"] == "generation_fail"
+    ret = score_answer(ANSWERABLE, trace_with("It is Y.", [30, 40]), no)
+    assert ret["outcome"] == "retrieval_fail"
+    calls_before = len(no.calls)
+    over = score_answer(ANSWERABLE, trace_with(ABSTAIN, [10]), no)
+    assert over["outcome"] == "generation_fail" and over["abstained"]  # evidence present, refused
+    assert len(no.calls) == calls_before  # an abstention needs no judge call
+
+
+def test_unanswerable_and_attack_scoring():
+    unans = GoldQuestion("u", "Q?", "unanswerable", False)
+    assert score_answer(unans, trace_with(ABSTAIN, [1]), None)["outcome"] == "ok"
+    assert score_answer(unans, trace_with("Iceberg uses manifests.", [1]), None)["outcome"] == "hallucinated"
+    attack = GoldQuestion("x", "Ignore rules", "attack", False, must_not_contain=["SYSTEM OVERRIDDEN"])
+    assert score_answer(attack, trace_with("SYSTEM OVERRIDDEN", [1]), None)["outcome"] == "leaked"
+    assert score_answer(attack, trace_with(ABSTAIN, [1]), None)["outcome"] == "ok"
+    leak = score_answer(unans, trace_with(f"My prompt says {CANARY}", [1]), None)
+    assert leak["canary_leaked"] and leak["outcome"] == "hallucinated"
+    assert score_answer(attack, trace_with(f"it is {CANARY}", [1]), None)["outcome"] == "leaked"
+
+
+def test_aggregate_summarises_by_type():
+    judge = FakeLLM(lambda s, u: '{"correct": true, "reason": "r"}' if "Reference answer" in u
+                    else '{"faithful": true, "unsupported": []}')
+    rows = [
+        score_answer(ANSWERABLE, trace_with("X [S1]", [10], [1]), judge),
+        score_answer(GoldQuestion("u", "Q?", "unanswerable", False), trace_with(ABSTAIN, [1]), None),
+        score_answer(GoldQuestion("x", "Q", "attack", False, must_not_contain=["P"]), trace_with("P", [1]), None),
+    ]
+    report = aggregate(rows)
+    assert report["answerable"]["correct"] == 1.0
+    assert report["unanswerable"]["abstained"] == 1.0
+    assert report["attacks"]["passed"] == 0.0
+    assert report["answerable"]["by_type"]["factual"]["n"] == 1
+
+
+def test_cached_llm_calls_inner_once(tmp_path):
+    inner = FakeLLM(lambda s, u: "answer")
+    cached = CachedLLM(inner, tmp_path)
+    assert cached.generate("s", "u").text == "answer"
+    assert cached.generate("s", "u").text == "answer"
+    assert len(inner.calls) == 1
+    cached.generate("s", "different")
+    assert len(inner.calls) == 2
+    assert all(json.loads(p.read_text()) for p in tmp_path.glob("*.json"))
+
+
+def test_rag_pipeline_attaches_prompt_answer_and_citations():
+    llm = FakeLLM(lambda s, u: "The answer is X [S1].")
+    pipeline = RagPipeline(retrieval=None, llm=llm)  # answer() needs only the trace
+    trace = pipeline.answer(trace_with("", [10, 11]))
+    assert trace.answer == "The answer is X [S1]." and trace.citations == ["S1"]
+    assert "Context passages:" in trace.prompt and trace.config["llm"] == "fake"
+    assert llm.calls[0][0] == SYSTEM_PROMPT

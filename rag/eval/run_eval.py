@@ -17,7 +17,7 @@ from typing import Any, Callable, Dict, List, Sequence
 from rag.config import RUNS_DIR
 from rag.eval.diagnose import locate_failure, stage_ranks
 from rag.eval.golden import GoldQuestion
-from rag.eval.metrics import score_hits
+from rag.eval.metrics import score_hits, strict_trace
 from rag.trace import Trace
 
 logger = logging.getLogger(__name__)
@@ -31,7 +31,10 @@ def run_eval(
     run_name: str,
     ks: Sequence[int] = (1, 3, 5, 10),
     out_root: Path = RUNS_DIR,
+    strict: bool = True,
 ) -> Dict[str, Any]:
+    """strict=True also requires a hit to contain the question's evidence terms, not merely to
+    overlap the gold pages. Questions without evidence terms fall back to page overlap."""
     out_dir = out_root / run_name
     trace_dir = out_dir / "traces"
     rows: List[Dict[str, Any]] = []
@@ -48,10 +51,11 @@ def run_eval(
         if trace.error:
             row["failure"] = "pipeline_error"
         elif q.answerable:
-            row["stage_ranks"] = stage_ranks(trace, q.gold_pages)
-            row["failure"] = locate_failure(trace, q.gold_pages)
+            judged = strict_trace(trace, q.evidence_terms) if strict else trace
+            row["stage_ranks"] = stage_ranks(judged, q.gold_pages)
+            row["failure"] = locate_failure(judged, q.gold_pages)
             row["scores"] = {
-                s.name: score_hits(s.hits, q.gold_pages, ks) for s in trace.stages
+                s.name: score_hits(s.hits, q.gold_pages, ks) for s in judged.stages
             }
         rows.append(row)
 

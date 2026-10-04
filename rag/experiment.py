@@ -26,6 +26,7 @@ from rag.config import GOLDEN_DIR, PROCESSED_DIR
 from rag.embed import get_embedder
 from rag.eval.golden import load_golden
 from rag.eval.run_eval import run_eval
+from rag.log import setup_logging
 from rag.retrieval.bm25 import BM25Index
 from rag.retrieval.pipeline import RetrievalConfig, RetrievalPipeline
 from rag.retrieval.rerank import CrossEncoderReranker, Reranker
@@ -101,8 +102,10 @@ def main() -> None:
     parser.add_argument("--variant", choices=["plain", "heading"], default="plain",
                         help="heading: embed 'section path + text' instead of text alone")
     parser.add_argument("--rebuild", action="store_true", help="re-embed even if an index exists")
+    parser.add_argument("--page-level", action="store_true",
+                        help="count a hit when it overlaps the gold pages, even without the evidence text")
     args = parser.parse_args()
-    logging.basicConfig(level=logging.INFO, format="%(message)s")
+    setup_logging()
 
     questions = load_golden(args.golden)
     embedder = get_embedder(args.embedder)
@@ -127,6 +130,7 @@ def main() -> None:
                 lambda q, c=config: pipeline.run(q.id, q.question, c),
                 run_name=f"{args.prefix}{name}__{config.name}",
                 ks=KS,
+                strict=not args.page_level,
             )
             rows.append({"chunker": name, "config": config.name, **summarise(report)})
     print()

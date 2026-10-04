@@ -23,6 +23,21 @@ def test_term_matches_across_aligned_whitespace():
     assert verify([question], texts) == []
 
 
+def test_strictify_demotes_hits_without_the_evidence_text():
+    from rag.eval.metrics import first_relevant_rank, strictify
+    from rag.types import Hit
+
+    on_page_without_answer = Hit("a", 1, 1.0, 10, 10, "unrelated words on the right page")
+    on_page_with_answer = Hit("b", 2, 0.9, 10, 10, "The answer is the   Write-Ahead Log here")
+    off_page = Hit("c", 3, 0.8, 50, 50, "write-ahead log elsewhere")
+    hits = [on_page_without_answer, on_page_with_answer, off_page]
+    assert first_relevant_rank(hits, [(10, 10)]) == 1  # page overlap alone
+    strict = strictify(hits, ["write-ahead log"])
+    assert first_relevant_rank(strict, [(10, 10)]) == 2  # now needs the evidence text
+    assert [h.rank for h in strict] == [1, 2, 3] and strict[0].page_start == 0
+    assert strictify(hits, []) == hits  # no terms, no change
+
+
 def test_batch_field_defaults_to_zero_and_loads(tmp_path):
     rows = [
         {"id": "a", "question": "?", "type": "unanswerable", "answerable": False},
