@@ -17,6 +17,12 @@ def q(**kw):
     return GoldQuestion(**base)
 
 
+def test_term_matches_across_aligned_whitespace():
+    texts = {1: "struct Person {\n  1: required string       userName,\n}"}
+    question = q(gold_pages=[(1, 1)], evidence_terms=["required string userName"])
+    assert verify([question], texts) == []
+
+
 def test_correct_label_passes():
     assert verify([q(evidence_terms=["SSTable"])], TEXTS) == []
 

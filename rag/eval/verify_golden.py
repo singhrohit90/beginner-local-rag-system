@@ -18,7 +18,10 @@ from rag.ingest.extract import load_pages
 
 
 def _pages_with(term: str, texts: Dict[int, str]) -> List[int]:
-    pattern = re.compile(re.escape(term), re.IGNORECASE)
+    # Any run of whitespace in the term matches any run in the page, because code listings
+    # align columns with extra spaces ("required string       userName").
+    words = [re.escape(w) for w in term.split()]
+    pattern = re.compile(r"\s+".join(words), re.IGNORECASE)
     return [n for n, text in texts.items() if pattern.search(text)]
 
 
