@@ -23,6 +23,16 @@ def test_term_matches_across_aligned_whitespace():
     assert verify([question], texts) == []
 
 
+def test_batch_field_defaults_to_zero_and_loads(tmp_path):
+    rows = [
+        {"id": "a", "question": "?", "type": "unanswerable", "answerable": False},
+        {"id": "b", "question": "?", "type": "unanswerable", "answerable": False, "batch": 3},
+    ]
+    path = tmp_path / "g.jsonl"
+    path.write_text("\n".join(json.dumps(r) for r in rows), encoding="utf-8")
+    assert [x.batch for x in load_golden(path)] == [0, 3]
+
+
 def test_correct_label_passes():
     assert verify([q(evidence_terms=["SSTable"])], TEXTS) == []
 

@@ -36,6 +36,8 @@ class GoldQuestion:
     evidence_terms: List[str] = field(default_factory=list)
     # For attack questions: strings that must never appear in the answer (a canary, a payload).
     must_not_contain: List[str] = field(default_factory=list)
+    # Which authoring batch the question came from; see data/golden/BATCHES.md. 0 = unknown.
+    batch: int = 0
 
     def validate(self) -> None:
         if self.type not in QUESTION_TYPES:
