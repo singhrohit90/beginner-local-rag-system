@@ -34,6 +34,15 @@ def verify(questions: Sequence[GoldQuestion], texts: Dict[int, str]) -> List[str
         if missing:
             problems.append(f"{q.id}: gold pages {missing} do not exist in the extracted pages")
             continue
+        if q.answerable and len(q.gold_pages) > 1 and q.evidence_terms:
+            # A multi-range question claims each range holds evidence, so each needs a term.
+            for start, end in q.gold_pages:
+                span = set(range(start, end + 1))
+                if not any(span & set(_pages_with(t, texts)) for t in q.evidence_terms):
+                    problems.append(
+                        f"{q.id}: gold range {[start, end]} contains none of the evidence terms; "
+                        "add a term that proves this range is needed, or drop the range"
+                    )
         for term in q.evidence_terms:
             found = _pages_with(term, texts)
             if q.answerable and not any(n in gold_numbers for n in found):

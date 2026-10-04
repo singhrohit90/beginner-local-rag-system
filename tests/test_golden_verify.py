@@ -42,6 +42,16 @@ def test_wrong_page_is_caught_and_correct_pages_are_suggested():
     assert len(problems) == 1 and "[2]" in problems[0]
 
 
+def test_each_range_of_a_multi_range_question_needs_evidence():
+    texts = {1: "alpha here", 2: "nothing", 3: "beta here"}
+    both = q(gold_pages=[(1, 1), (3, 3)], evidence_terms=["alpha", "beta"])
+    padded = q(gold_pages=[(1, 1), (2, 2)], evidence_terms=["alpha", "beta"])
+    assert verify([both], texts) == []
+    problems = verify([padded], texts)
+    assert any("gold range [2, 2] contains none" in p for p in problems)
+    assert not any("gold range [1, 1]" in p for p in problems)
+
+
 def test_missing_page_is_caught():
     problems = verify([q(gold_pages=[(99, 99)])], TEXTS)
     assert "do not exist" in problems[0]
