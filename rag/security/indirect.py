@@ -47,6 +47,7 @@ logger = logging.getLogger("rag.security")
 
 DEFENSES: Dict[str, tuple] = {
     "naive": ("naive",),  # first-draft prompt, no injection rules: the unprotected baseline
+    "naive_filter": ("naive", "filter"),  # the baseline plus only the output filter
     "none": (),  # the production prompt, whose rules already tell the model to ignore passages
     "scan": ("scan",),
     "spotlight": ("spotlight",),

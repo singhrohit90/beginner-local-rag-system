@@ -57,6 +57,8 @@ def main() -> None:
     parser.add_argument("--embedder", default="st:sentence-transformers/all-mpnet-base-v2")
     parser.add_argument("--chunks-dir", type=Path, default=PROCESSED_DIR / "chunks")
     parser.add_argument("--golden", type=Path, default=GOLDEN_DIR / "ddia_questions.jsonl")
+    parser.add_argument("--style", default="standard", choices=["standard", "spotlight", "naive"],
+                        help="prompt style; spotlight is the hardened prompt from rag.security.defenses")
     parser.add_argument("--workers", type=int, default=4)
     parser.add_argument("--limit", type=int, default=0, help="only the first N questions")
     parser.add_argument("--name", default=None)
@@ -77,7 +79,7 @@ def main() -> None:
     retrieval = RetrievalPipeline(chunkset, index, BM25Index(chunkset.chunks), embedder, reranker)
     generator = get_llm(args.llm)
     judge = None if args.judge == "none" else get_llm(args.judge)  # none: skip correctness judging
-    pipeline = RagPipeline(retrieval, generator)
+    pipeline = RagPipeline(retrieval, generator, style=args.style)
 
     # Retrieval touches the GPU, so run it in order; the slow, network-bound LLM calls run in parallel.
     contexts = {q.id: retrieval.run(q.id, q.question, config) for q in questions}
