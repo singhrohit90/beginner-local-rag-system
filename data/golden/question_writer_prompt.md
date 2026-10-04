@@ -8,7 +8,7 @@ the chat message is short.
 Upload both as sources:
 
 1. `data/processed/ddia_for_agent.txt` (the book, made by `python -m rag.ingest.export_text`)
-2. `data/golden/question_writer_rules.md` (the rules, 4.7 KB)
+2. `data/golden/question_writer_rules.md` (the rules, about 4,000 characters)
 
 If the notebook has a place for custom chat instructions, you can paste the rules there instead,
 but the source file is the safer route.
