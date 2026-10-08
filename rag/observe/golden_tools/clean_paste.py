@@ -40,9 +40,11 @@ def _fix_notes(text: str) -> Tuple[str, int]:
 
 def repair_text(text: str) -> Tuple[str, List[str]]:
     changes = []
+    removed = sorted({m.group(0) + (text[m.end()] if m.end() < len(text) else "") for m in _BAD_ESCAPE.finditer(text)})
     fixed, n = _BAD_ESCAPE.subn("", text)
     if n:
-        changes.append(f"removed {n} invalid backslash escapes (markdown \\_ and similar)")
+        # name them: a pattern such as \\d inside evidence text would otherwise change without notice
+        changes.append(f"removed {n} invalid backslash escapes, kinds: {', '.join(removed[:8])}")
     fixed, n = _fix_notes(fixed)
     if n:
         changes.append(f"re-escaped raw double quotes inside notes in {n} objects")

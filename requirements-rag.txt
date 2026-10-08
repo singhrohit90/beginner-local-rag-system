@@ -1,8 +1,10 @@
 pymupdf>=1.24
 numpy>=1.26
 pytest>=8
-# optional, only for semantic chunking and local embeddings:
-# sentence-transformers
+# embeddings, the semantic chunker and the cross-encoder reranker (the default embedder needs it):
+sentence-transformers>=3
+# only for the gemini: provider
+# google-genai
 
 # web API (rag/api)
 fastapi>=0.110

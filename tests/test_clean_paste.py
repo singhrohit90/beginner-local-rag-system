@@ -40,3 +40,9 @@ def test_normalise():
                             "gold_pages": [1], "must_not_contain": "PWNED"})
     assert obj["reference_answer"] == "x" and obj["must_not_contain"] == ["PWNED"]
     assert any("not a list" in n for n in notes)
+
+
+def test_repair_names_the_escapes_it_removes():
+    fixed, changes = repair_text(r'{"a": "x\_y \d+ z"}')
+    assert fixed == '{"a": "x_y d+ z"}'
+    assert any(r"\_" in c and r"\d" in c for c in changes)

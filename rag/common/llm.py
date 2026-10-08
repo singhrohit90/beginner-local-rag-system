@@ -15,6 +15,7 @@ import hashlib
 import json
 import logging
 import os
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -190,6 +191,12 @@ class OpenAICompatLLM:
         self._timeout = timeout
         self._retries = retries
 
+    @property
+    def cache_salt(self) -> str:
+        """Settings that change the answer without changing the model name. Empty by default, so
+        existing cache entries stay valid."""
+        return f"effort={self._effort}" if self._effort else ""
+
     def _headers(self) -> dict:
         headers = {"Content-Type": "application/json"}
         if self._key:
@@ -313,12 +320,31 @@ class CachedLLM:
         parts = [self.name, system, user, max_output_tokens]
         if json_mode:
             parts.append("json")  # only added when set, so older cache entries stay valid
+        salt = getattr(self._inner, "cache_salt", "")
+        if salt:
+            parts.append(salt)
         key = hashlib.sha256(json.dumps(parts).encode()).hexdigest()
         path = self._dir / f"{key}.json"
         if path.exists():
-            return LLMResult(**json.loads(path.read_text(encoding="utf-8")))
+            try:
+                return LLMResult(**json.loads(path.read_text(encoding="utf-8")))
+            except (ValueError, TypeError, OSError):
+                pass  # a half-written or damaged entry: ask the model again and overwrite it
         result = self._inner.generate(system, user, max_output_tokens, json_mode)
-        path.write_text(json.dumps(asdict(result)), encoding="utf-8")
+        temporary = path.with_name(f"{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+        try:
+            temporary.write_text(json.dumps(asdict(result)), encoding="utf-8")
+            for attempt in range(5):
+                try:
+                    os.replace(temporary, path)  # readers see the old file or the whole new one
+                    break
+                except PermissionError:  # Windows: another thread has the file open right now
+                    if attempt == 4:
+                        raise
+                    time.sleep(0.02 * (attempt + 1))
+        except OSError as err:  # the cache is an optimisation: a failed write must not fail the call
+            logger.warning("could not write the LLM cache entry: %s", err)
+            temporary.unlink(missing_ok=True)
         return result
 
 

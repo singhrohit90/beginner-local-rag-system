@@ -49,7 +49,7 @@ class DocumentService:
         embedder: Embedder,
         llm: LLM,
         embedder_spec: str,
-        traces_dir: Optional[Path] = None,
+        keep_traces: bool = True,
         reranker: Optional[Reranker] = None,
         max_upload_bytes: int = 50 * 1024 * 1024,
         store: Optional[ChunkStore] = None,
@@ -60,7 +60,7 @@ class DocumentService:
         self.embedder_spec = embedder_spec
         self.llm = llm
         self.reranker = reranker
-        self.traces_dir = traces_dir
+        self.keep_traces = keep_traces  # one JSON file per question, inside the document's folder
         self.max_upload_bytes = max_upload_bytes
         self._ingest_lock = threading.Lock()  # one ingestion at a time: the embedder shares the GPU
         self._status_lock = threading.Lock()  # one status.json writer at a time
@@ -81,30 +81,28 @@ class DocumentService:
         return path
 
     @staticmethod
-    def _read_json(path: Path) -> Dict[str, Any]:
-        # The file is replaced atomically, but Windows can briefly refuse a read during the swap.
-        for attempt in range(5):
+    def _retry(action, errors, seconds: float = 2.0):
+        """Windows briefly refuses to open a file that another thread is replacing, so retry
+        for a short while instead of failing the request."""
+        deadline = time.monotonic() + seconds
+        while True:
             try:
-                return json.loads(path.read_text(encoding="utf-8"))
-            except (PermissionError, json.JSONDecodeError):
-                if attempt == 4:
+                return action()
+            except errors:
+                if time.monotonic() >= deadline:
                     raise
-                time.sleep(0.05)
-        raise AssertionError("unreachable")
+                time.sleep(0.02)
 
-    @staticmethod
-    def _atomic_write(path: Path, text: str) -> None:
+    @classmethod
+    def _read_json(cls, path: Path) -> Dict[str, Any]:
+        return cls._retry(lambda: json.loads(path.read_text(encoding="utf-8")), (PermissionError, json.JSONDecodeError))
+
+    @classmethod
+    def _atomic_write(cls, path: Path, text: str) -> None:
         """Write to a temporary file and swap it in, so a reader sees the old or new file, never half."""
         temporary = path.with_name(path.name + ".tmp")
         temporary.write_text(text, encoding="utf-8")
-        for attempt in range(5):
-            try:
-                os.replace(temporary, path)
-                return
-            except PermissionError:
-                if attempt == 4:
-                    raise
-                time.sleep(0.05)
+        cls._retry(lambda: os.replace(temporary, path), PermissionError)
 
     def _write_status(self, doc_id: str, **changes: Any) -> Dict[str, Any]:
         directory = self._dir(doc_id)  # raises NotFound if the document was deleted meanwhile
@@ -239,8 +237,11 @@ class DocumentService:
         started = time.perf_counter()
         query_id = f"{doc_id}-{int(time.time() * 1000)}"
         trace = RagPipeline(retrieval, self.llm, style=style, subject="document").run(query_id, question, CONFIGS[config])
-        if self.traces_dir:
-            trace.save(self.traces_dir)
+        if self.keep_traces:  # inside the document's folder, so deleting the document deletes them
+            try:
+                trace.save(self._dir(doc_id) / "chat")
+            except NotFound:
+                pass  # deleted while the model was answering
         usage = trace.config.get("usage", {})
         context = trace.stage("context").hits
         return {

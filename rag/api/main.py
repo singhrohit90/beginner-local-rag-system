@@ -20,6 +20,8 @@ There is no login yet.
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
+import logging
+import re
 import threading
 from urllib.parse import urlparse
 
@@ -34,6 +36,7 @@ from rag.ingestion.chunk import STRATEGIES
 from rag.query.configs import CONFIGS
 
 STATIC = Path(__file__).parent / "static"
+logger = logging.getLogger("rag.api")
 # The service has no reranker loaded, so only the configs that do not need one are offered.
 USABLE_CONFIGS = sorted(name for name, c in CONFIGS.items() if not c.rerank)
 DEFAULT_HOSTS = ("127.0.0.1", "localhost")
@@ -48,7 +51,7 @@ class AskRequest(BaseModel):
 
 def build_default_service() -> DocumentService:
     """Real models, chosen by .env: RAG_LLM, RAG_EMBEDDER. Heavy, so only built when serving."""
-    from rag.common.config import DATA_DIR, RUNS_DIR
+    from rag.common.config import DATA_DIR
     from rag.common.embed import get_embedder
     from rag.common.llm import get_llm
     from rag.common.secrets import setting
@@ -58,8 +61,8 @@ def build_default_service() -> DocumentService:
         root=DATA_DIR / "uploads",
         embedder=get_embedder(spec),
         embedder_spec=spec,
-        llm=get_llm(setting("RAG_LLM", "vllm:/models/gpt-oss-20b")),
-        traces_dir=RUNS_DIR / "chat",
+        # no cache: it would keep every uploaded passage and question on disk after a delete
+        llm=get_llm(setting("RAG_LLM", "vllm:/models/gpt-oss-20b"), cache_dir=None),
     )
 
 
@@ -148,7 +151,10 @@ def create_app(
         except BadUpload as err:
             raise HTTPException(409, str(err))
         except Exception as err:  # most often the model server being unreachable
-            raise HTTPException(502, f"{type(err).__name__}: {err}")
+            logger.exception("ask failed for document %s", doc_id)
+            # the caller gets the reason without internal addresses; the full error is in the server log
+            reason = re.sub(r"https?://\S+", "<url>", str(err))[:200]
+            raise HTTPException(502, f"{type(err).__name__}: {reason}")
 
     app.include_router(v1)
     return app

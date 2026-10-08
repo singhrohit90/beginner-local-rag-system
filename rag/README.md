@@ -224,7 +224,7 @@ Metric notes:
 Upload a PDF, wait for it to show `ready`, select it and ask. Click an answer to see the passages
 the model was given (page, score, chunk id), which stages ran and how long each took, and what the
 guard did. Each upload gets its own folder `data/uploads/<doc_id>/` with its own index, so
-documents never mix; one document is searched at a time. Chat traces are saved to `runs/chat/`.
+documents never mix; one document is searched at a time. Each question's trace is saved in the document's own folder, `data/uploads/<doc_id>/chat/`, and the API does not use the LLM disk cache, so deleting a document removes everything kept about it.
 
 Port 8000 is often taken on this machine by another service, so pick any free port. Models come
 from `.env` (`RAG_LLM`, `RAG_EMBEDDER`); if the model server is down, asking returns a 502 with

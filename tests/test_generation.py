@@ -256,3 +256,44 @@ def test_abstention_is_recognised_in_document_wording():
     assert looks_like_abstention("I cannot answer this from the provided document.")
     assert looks_like_abstention("The document does not mention that.")
     assert not looks_like_abstention("Replication copies data to followers [S1].")
+
+
+def test_cache_survives_a_damaged_entry_and_concurrent_writers(tmp_path):
+    import threading
+
+    inner = FakeLLM(lambda s, u: "answer")
+    cached = CachedLLM(inner, tmp_path)
+    cached.generate("s", "u")
+    entry = next(tmp_path.glob("*.json"))
+    entry.write_text('{"text": "half written', encoding="utf-8")  # as if another process died mid-write
+    assert cached.generate("s", "u").text == "answer"  # asks the model again instead of crashing
+    assert cached.generate("s", "u").text == "answer" and len(inner.calls) == 2
+
+    errors = []
+
+    def hammer():
+        try:
+            for i in range(40):
+                cached.generate("shared", f"u{i % 5}")
+        except Exception as err:  # pragma: no cover
+            errors.append(err)
+
+    threads = [threading.Thread(target=hammer) for _ in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert errors == [] and not list(tmp_path.glob("*.tmp"))
+
+
+def test_settings_that_change_answers_are_part_of_the_cache_key(tmp_path):
+    class Salted(FakeLLM):
+        def __init__(self, salt):
+            super().__init__()
+            self.cache_salt = salt
+
+    a, b = Salted(""), Salted("effort=high")
+    CachedLLM(a, tmp_path).generate("s", "u")
+    CachedLLM(b, tmp_path).generate("s", "u")
+    assert len(a.calls) == 1 and len(b.calls) == 1  # the second setting did not reuse the first answer
+    assert len(list(tmp_path.glob("*.json"))) == 2

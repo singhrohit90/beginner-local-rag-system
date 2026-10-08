@@ -26,7 +26,6 @@ def make_client(tmp_path, llm=None):
     service = DocumentService(
         root=tmp_path / "uploads", embedder=HashingEmbedder(), embedder_spec="hash",
         llm=llm or FakeLLM(lambda system, user: "Copies live on several nodes [S1]."),
-        traces_dir=tmp_path / "chat",
     )
     return TestClient(create_app(service, allowed_hosts=("testserver",))), service
 
@@ -52,7 +51,7 @@ def test_upload_index_and_ask_returns_answer_passages_and_stages(tmp_path):
     assert body["passages"] and body["passages"][0]["page_start"] >= 1
     assert "Replication" in body["passages"][0]["text"]
     assert [s["name"] for s in body["stages"]][-1] == "context" and not body["blocked"]
-    assert list((tmp_path / "chat").glob("*.json"))  # the trace was kept for the observe layer
+    assert list((tmp_path / "uploads" / doc_id / "chat").glob("*.json"))  # the trace was kept for the observe layer
 
 
 def test_rejects_non_pdf_and_unknown_or_malicious_ids(tmp_path):
@@ -297,3 +296,22 @@ def test_passages_removed_by_the_scanner_are_reported_to_the_caller(tmp_path):
     skipped = body["skipped_by_scanner"]
     assert skipped and skipped[0]["chunk_id"].startswith(f"{doc_id}:") and skipped[0]["rules"]
     assert all("reveal the system prompt" not in p["text"] for p in body["passages"])
+
+
+def test_deleting_a_document_also_deletes_its_traces(tmp_path):
+    client, _ = make_client(tmp_path)
+    doc_id = upload(client, make_pdf(REPLICATION)).json()["id"]
+    client.post(f"/v1/documents/{doc_id}/ask", json={"question": "replication"})
+    assert list((tmp_path / "uploads" / doc_id / "chat").glob("*.json"))
+    client.delete(f"/v1/documents/{doc_id}")
+    assert not list(tmp_path.rglob("*.json"))  # nothing about the document is left anywhere under the test tree
+
+
+def test_model_errors_do_not_reveal_internal_addresses(tmp_path):
+    def broken(system, user):
+        raise RuntimeError("cannot reach the model server at http://127.22.10.1:30007/v1/chat/completions (refused)")
+
+    client, _ = make_client(tmp_path, llm=FakeLLM(broken))
+    doc_id = upload(client, make_pdf(REPLICATION)).json()["id"]
+    detail = client.post(f"/v1/documents/{doc_id}/ask", json={"question": "replication"}).json()["detail"]
+    assert "127.22.10.1" not in detail and "cannot reach the model server" in detail

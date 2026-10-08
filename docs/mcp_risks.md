@@ -41,8 +41,8 @@ Fix: keep tool descriptions in version control, review changes like code, pin th
 Fix: filter by owner inside the query (not after), return generic errors, never echo server paths or stack traces to the caller (the API currently returns the exception text on a 502; shorten it for non-local callers).
 
 ## 10. Logging sensitive content
-Questions, answers and passages can hold private text. Chat traces are saved to `runs/chat/`.
-Fix: decide retention and who may read traces, add per-user trace folders or an owner field, and redact before sharing traces for evaluation.
+Questions, answers and passages can hold private text. Chat traces are saved inside each document's folder (`data/uploads/<doc_id>/chat/`) and the API does not use the LLM disk cache, so deleting a document removes them.
+Fix still open: decide retention for documents that are not deleted, who may read traces, an owner field on traces, and redaction before traces are shared for evaluation.
 
 ## 11. Contract drift
 A scraper or MCP server breaks if the API changes under it.
