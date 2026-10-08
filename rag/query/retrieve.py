@@ -1,19 +1,16 @@
-"""Query step 1: find candidate chunks. Returns (row, score) pairs, best first."""
+"""Query step 1: find candidate chunks in the store. Returns (chunk, score) pairs, best first,
+only from documents inside the scope."""
 
-from typing import List, Tuple
+import numpy as np
 
-from rag.common.bm25 import BM25Index
-from rag.common.embed import Embedder
-from rag.common.store import VectorIndex
-
-Scored = List[Tuple[int, float]]
+from rag.common.chunk_store import ChunkStore, Scope, Scored
 
 
-def dense_search(index: VectorIndex, embedder: Embedder, question: str, k: int) -> Scored:
-    """Nearest chunks by embedding similarity."""
-    return index.search(embedder.embed_query(question), k)
+def dense_search(store: ChunkStore, vector: np.ndarray, k: int, scope: Scope) -> Scored:
+    """Nearest chunks by embedding similarity. The caller embeds the question."""
+    return store.search_dense(vector, k, scope)
 
 
-def keyword_search(index: BM25Index, question: str, k: int) -> Scored:
+def keyword_search(store: ChunkStore, question: str, k: int, scope: Scope) -> Scored:
     """Best chunks by BM25 keyword match."""
-    return index.search(question, k)
+    return store.search_keyword(question, k, scope)

@@ -150,3 +150,12 @@ def test_extra_allowed_origins_can_be_configured(tmp_path):
     ok = client.post("/v1/documents", files={"file": ("b.pdf", make_pdf(REPLICATION), "application/pdf")},
                      headers={"Origin": "https://tools.example"})
     assert ok.status_code == 202
+
+
+def test_a_single_document_is_not_cut_down_by_the_per_source_cap(tmp_path):
+    client, _ = make_client(tmp_path)
+    pages = [f"Topic {i} node discussion: " + " ".join(f"word{i}x{j} node" for j in range(60)) for i in range(5)]
+    doc_id = upload(client, make_pdf(*pages), chunker="fixed").json()["id"]
+    body = client.post(f"/v1/documents/{doc_id}/ask", json={"question": "node discussion", "config": "bm25"}).json()
+    assert len(body["passages"]) > 2  # five passages are allowed; the cap only matters when many documents compete
+    assert all(p["chunk_id"].startswith(f"{doc_id}:") for p in body["passages"])

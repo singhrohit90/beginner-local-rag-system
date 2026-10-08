@@ -104,10 +104,7 @@ def test_select_context_dedupes_overlap_budgets_words_and_uses_parents():
 
 def _pipeline(chunkset, reranker=None):
     embedder = HashingEmbedder()
-    return RetrievalPipeline(
-        chunkset, VectorIndex.build(chunkset.chunks, embedder), BM25Index(chunkset.chunks),
-        embedder, reranker,
-    )
+    return RetrievalPipeline.from_chunkset(chunkset, VectorIndex.build(chunkset.chunks, embedder), embedder, reranker)
 
 
 PAGES = [

@@ -5,7 +5,6 @@ from rag.ingestion.chunking.document import Document
 from rag.common.embed import HashingEmbedder
 from rag.query.prompt import CANARY
 from rag.common.llm import FakeLLM
-from rag.common.bm25 import BM25Index
 from rag.query.configs import RetrievalConfig
 from rag.query.pipeline import RetrievalPipeline
 from rag.common.store import VectorIndex
@@ -94,8 +93,7 @@ PAGES = [Page(1, "Compaction merges log segments and discards overwritten keys. 
 def base():
     chunkset = RecursiveChunker(size=40, overlap=5).chunk(Document.from_pages(PAGES))
     embedder = HashingEmbedder()
-    return RetrievalPipeline(chunkset, VectorIndex.build(chunkset.chunks, embedder),
-                             BM25Index(chunkset.chunks), embedder, None), embedder
+    return RetrievalPipeline.from_chunkset(chunkset, VectorIndex.build(chunkset.chunks, embedder), embedder), embedder
 
 
 def test_poison_chunk_is_isolated_from_real_pages(base):
@@ -103,8 +101,8 @@ def test_poison_chunk_is_isolated_from_real_pages(base):
     chunk = poison_chunk(POISONED_DOCS[0], 0)
     assert chunk.page_start >= 9000 and chunk.chunk_id == "poison-P01"
     augmented = pipeline_with(pipeline, [chunk], embedder)
-    assert len(augmented.chunks) == len(pipeline.chunks) + 1
-    assert len(pipeline.chunks) == len(base[0].chunks)  # the original corpus is untouched
+    assert len(augmented.store.document_ids(augmented.scope)) == 2  # the book plus the planted document
+    assert len(pipeline.store.document_ids(pipeline.scope)) == 1  # the original corpus is untouched
     assert pipeline_with(pipeline, [], embedder) is pipeline  # nothing to add, nothing rebuilt
     trace = augmented.run("q", "How does compaction work in a log-structured storage engine?",
                           RetrievalConfig("t", bm25=True, dense=True, top_k=3, scan=False))

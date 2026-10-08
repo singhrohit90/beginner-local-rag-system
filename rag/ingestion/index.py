@@ -7,6 +7,7 @@ two pipelines. It is cached on disk and rebuilt only when the chunks changed.
 from pathlib import Path
 
 from rag.common.config import PROCESSED_DIR
+from rag.common.chunk_store import ChunkStore
 from rag.common.embed import Embedder
 from rag.common.store import VectorIndex, index_dir
 from rag.ingestion.chunking.base import ChunkSet
@@ -31,3 +32,11 @@ def get_index(
     index = VectorIndex.build(chunkset.chunks, embedder, text_of, variant=variant)
     index.save(directory)
     return index
+
+
+def index_document(store: ChunkStore, doc_id: str, owner: str, chunkset: ChunkSet, index: VectorIndex) -> None:
+    """Write one document's chunks and vectors into a store, replacing any earlier version."""
+    store.upsert(
+        doc_id, owner, chunkset.chunks, index.vectors, index.embedder_name, chunkset.parents,
+        {"chunker": chunkset.strategy, "chunker_params": chunkset.params},
+    )

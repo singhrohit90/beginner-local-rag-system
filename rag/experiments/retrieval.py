@@ -27,7 +27,6 @@ from rag.common.embed import get_embedder
 from rag.observe.golden import load_golden
 from rag.observe.retrieval_quality.run_eval import run_eval
 from rag.common.log import setup_logging
-from rag.common.bm25 import BM25Index
 from rag.ingestion.index import get_index
 from rag.query.configs import CONFIGS
 from rag.query.pipeline import RetrievalPipeline
@@ -100,7 +99,7 @@ def main() -> None:
                 "%s: median %d tokens, %.1f%% of chunks exceed the model limit of %d (tail not embedded)",
                 name, index.meta["median_tokens"], index.meta["truncated_pct"], index.meta["max_tokens"],
             )
-        pipeline = RetrievalPipeline(chunkset, index, BM25Index(chunkset.chunks), embedder, reranker)
+        pipeline = RetrievalPipeline.from_chunkset(chunkset, index, embedder, reranker)
         for config in configs:
             report = run_eval(
                 questions,

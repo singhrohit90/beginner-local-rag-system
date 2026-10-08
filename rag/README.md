@@ -9,9 +9,9 @@ every wrong answer can be traced to a stage.
     PDF                                            question
      |  extract.py     clean pages + bookmarks      |  retrieve.py        dense + keyword search
      |  chunk.py       pick a chunking strategy     |  fusion.py          merge the two lists
-     |  index.py       embed + cache vectors        |  rerank.py          cross-encoder (optional)
+     |  index.py       embed, cache, upsert         |  rerank.py          cross-encoder (optional)
      v                                              |  select_context.py  dedupe, cap, word budget
-    vector index  ----- the only link ------>      |  generate.py        prompt + call the model
+    chunk store   ----- the only link ------>      |  generate.py        prompt + call the model
                                                     |  guard.py           scanner + output filter
                                                     v
                                                   answer + Trace  --->  OBSERVE (rag/observe)
@@ -21,7 +21,7 @@ every wrong answer can be traced to a stage.
 
 | Folder | Holds |
 |--------|-------|
-| `rag/common/` | what both pipelines share: `types`, `config`, `trace`, `llm`, `embed`, `store` (vector index), `bm25` |
+| `rag/common/` | what both pipelines share: `types`, `config`, `trace`, `llm`, `embed`, and `chunk_store` (the interface the query side reads through, with an in-memory implementation built on `store` and `bm25`) |
 | `rag/ingestion/` | the ingestion pipeline and its steps; `chunking/` has the five strategies |
 | `rag/query/` | the query pipeline and its steps, `configs.py` for the named retrieval configs |
 | `rag/observe/` | `retrieval_quality/` (metrics, failure diagnosis), `generation_quality/` (judge, answer scoring), `golden.py`, `golden_tools/` (helpers for writing the question set) |

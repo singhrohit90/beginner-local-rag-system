@@ -19,9 +19,9 @@ from typing import Any, Dict, List, Optional
 
 from rag.common.embed import Embedder
 from rag.common.llm import LLM
-from rag.common.bm25 import BM25Index
+from rag.common.chunk_store import ChunkStore, MemoryChunkStore, Scope
 from rag.ingestion.chunking.base import load_chunkset
-from rag.ingestion.index import get_index
+from rag.ingestion.index import get_index, index_document
 from rag.ingestion.pipeline import ingest
 from rag.query.configs import CONFIGS
 from rag.query.guard import scan_chunks
@@ -29,6 +29,7 @@ from rag.query.pipeline import RagPipeline, RetrievalPipeline
 from rag.query.rerank import Reranker
 
 DOC_ID = re.compile(r"^[0-9a-f]{12}$")
+LOCAL_OWNER = "local"  # every document has this owner until real users arrive (see docs/auth_plan.md)
 STATES = ("queued", "processing", "ready", "failed")
 
 
@@ -50,6 +51,7 @@ class DocumentService:
         traces_dir: Optional[Path] = None,
         reranker: Optional[Reranker] = None,
         max_upload_bytes: int = 50 * 1024 * 1024,
+        store: Optional[ChunkStore] = None,
     ):
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
@@ -60,7 +62,7 @@ class DocumentService:
         self.traces_dir = traces_dir
         self.max_upload_bytes = max_upload_bytes
         self._ingest_lock = threading.Lock()  # one ingestion at a time: the embedder shares the GPU
-        self._pipelines: Dict[str, RetrievalPipeline] = {}
+        self.store: ChunkStore = store or MemoryChunkStore()  # a vector database plugs in here
 
     # ---- paths and status ---------------------------------------------------------------
 
@@ -125,25 +127,36 @@ class DocumentService:
 
     def delete(self, doc_id: str) -> None:
         directory = self._dir(doc_id)
-        self._pipelines.pop(doc_id, None)
+        self.store.delete_document(doc_id)
         shutil.rmtree(directory)
 
     # ---- asking -------------------------------------------------------------------------
 
     def _retrieval(self, doc_id: str) -> RetrievalPipeline:
-        if doc_id in self._pipelines:
-            return self._pipelines[doc_id]
         status = self.get(doc_id)
         if status["state"] != "ready":
             raise BadUpload(f"document is {status['state']}, not ready")
+        if not self.store.has_document(doc_id):  # first question since the server started
+            self._load_into_store(doc_id, status)
+        return RetrievalPipeline(self.store, self.embedder, Scope(LOCAL_OWNER, (doc_id,)), self.reranker)
+
+    def _load_into_store(self, doc_id: str, status: Dict[str, Any]) -> None:
         directory = self._dir(doc_id)
         chunkset = load_chunkset(directory / "chunks", status["chunker"])
-        for chunk in chunkset.chunks:
-            chunk.meta["source"] = doc_id  # lets the per-source cap and the scanner treat uploads as one source
         index = get_index(chunkset, self.embedder, "plain", False, root=directory)
-        pipeline = RetrievalPipeline(chunkset, index, BM25Index(chunkset.chunks), self.embedder, self.reranker)
-        self._pipelines[doc_id] = pipeline
-        return pipeline
+        # chunk ids must be unique across the store, and every upload numbers its chunks from zero
+        qualify = lambda cid: f"{doc_id}:{cid}"
+        for chunk in chunkset.chunks:
+            chunk.chunk_id = qualify(chunk.chunk_id)
+            chunk.meta["source"] = doc_id  # lets the scanner and per-source cap treat uploads as sources
+            if "parent_id" in chunk.meta:
+                chunk.meta["parent_id"] = qualify(chunk.meta["parent_id"])
+        parents = {}
+        for parent in chunkset.parents.values():
+            parent.chunk_id = qualify(parent.chunk_id)
+            parents[parent.chunk_id] = parent
+        chunkset.parents = parents
+        index_document(self.store, doc_id, LOCAL_OWNER, chunkset, index)
 
     def ask(self, doc_id: str, question: str, config: str = "weighted", style: str = "standard") -> Dict[str, Any]:
         retrieval = self._retrieval(doc_id)

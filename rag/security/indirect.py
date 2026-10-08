@@ -26,8 +26,6 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-import numpy as np
-
 from rag.ingestion.chunking.base import ChunkSet, load_chunkset
 from rag.common.config import PROCESSED_DIR, RUNS_DIR
 from rag.common.embed import Embedder, get_embedder
@@ -37,9 +35,7 @@ from rag.query.generate import answer_from_context, looks_like_abstention
 from rag.common.llm import get_llm
 from rag.common.log import setup_logging
 from rag.common.secrets import setting
-from rag.common.bm25 import BM25Index
 from rag.query.pipeline import RetrievalPipeline
-from rag.common.store import VectorIndex
 from rag.security.defenses import classify
 from rag.query.guard import filter_output
 from rag.security.fixtures import POISONED_DOCS, PoisonedDoc
@@ -78,15 +74,14 @@ def poison_chunk(doc: PoisonedDoc, number: int, copy: int = 0) -> Chunk:
 
 def pipeline_with(base: RetrievalPipeline, extra: List[Chunk], embedder: Embedder) -> RetrievalPipeline:
     """The base pipeline's corpus plus extra chunks. Base vectors are reused; only the new
-    chunks are embedded."""
+    chunks are embedded. The base pipeline is left untouched."""
     if not extra:
         return base
-    chunkset = ChunkSet(base.chunkset.strategy, base.chunkset.params,
-                        base.chunkset.chunks + extra, base.chunkset.parents)
-    vectors = np.vstack([base.vector_index.vectors, embedder.embed_documents([c.text for c in extra])])
-    index = VectorIndex(base.vector_index.chunk_ids + [c.chunk_id for c in extra], vectors,
-                        base.vector_index.embedder_name, dict(base.vector_index.meta))
-    return RetrievalPipeline(chunkset, index, BM25Index(chunkset.chunks), embedder, None)
+    store = base.store.copy()  # the planted text is a second document owned by the same user
+    store.upsert(f"poison-{extra[0].meta['poison']}", base.scope.owner, extra,
+                 embedder.embed_documents([c.text for c in extra]), embedder.name,
+                 info=base.store.describe(base.scope))
+    return RetrievalPipeline(store, embedder, base.scope, None)
 
 
 @dataclass
@@ -177,8 +172,7 @@ def main() -> None:
 
     embedder = get_embedder(args.embedder)
     chunkset = load_chunkset(args.chunks_dir, args.chunker)
-    base = RetrievalPipeline(chunkset, get_index(chunkset, embedder, "plain", False),
-                             BM25Index(chunkset.chunks), embedder, None)
+    base = RetrievalPipeline.from_chunkset(chunkset, get_index(chunkset, embedder, "plain", False), embedder)
     llm = get_llm(args.llm)
     config = CONFIGS[args.config]
     defenses = [d.strip() for d in args.defenses.split(",")]

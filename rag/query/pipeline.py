@@ -13,7 +13,7 @@ switch a stage off, and a stage that is off leaves no trace entry, so the eval s
 from dataclasses import asdict
 from typing import Dict, List, Optional, Sequence, Tuple
 
-from rag.common.bm25 import BM25Index
+from rag.common.chunk_store import ChunkStore, MemoryChunkStore, Scope
 from rag.common.embed import Embedder
 from rag.common.llm import LLM
 from rag.common.store import VectorIndex
@@ -30,48 +30,67 @@ from rag.query.select_context import ContextConfig, hit_from_chunk, select_conte
 
 
 class RetrievalPipeline:
+    """Reads from a ChunkStore, for one Scope (an owner and, optionally, some of their documents)."""
+
     def __init__(
         self,
-        chunkset: ChunkSet,
-        vector_index: VectorIndex,
-        bm25_index: BM25Index,
+        store: ChunkStore,
         embedder: Embedder,
+        scope: Scope,
         reranker: Optional[Reranker] = None,
     ):
-        self.chunkset = chunkset
-        self.chunks: List[Chunk] = chunkset.chunks
-        self.by_id: Dict[str, Chunk] = {c.chunk_id: c for c in self.chunks}
-        self.vector_index = vector_index
-        self.bm25_index = bm25_index
+        self.store = store
         self.embedder = embedder
+        self.scope = scope
         self.reranker = reranker
 
-    def _hits(self, scored: Sequence[Tuple[int, float]], keep_text: bool = True) -> List[Hit]:
-        return [
-            hit_from_chunk(self.chunks[row], rank, score, keep_text)
-            for rank, (row, score) in enumerate(scored, start=1)
-        ]
+    @classmethod
+    def from_chunkset(
+        cls,
+        chunkset: ChunkSet,
+        vector_index: VectorIndex,
+        embedder: Embedder,
+        reranker: Optional[Reranker] = None,
+        owner: str = "local",
+        doc_id: str = "doc",
+    ) -> "RetrievalPipeline":
+        """One document in a fresh in-memory store. Used by the experiments and the tests."""
+        store = MemoryChunkStore.from_chunkset(chunkset, vector_index, doc_id, owner)
+        return cls(store, embedder, Scope(owner), reranker)
 
     def run(self, query_id: str, question: str, config: RetrievalConfig) -> Trace:
+        store, scope = self.store, self.scope
+        info = store.describe(scope)
         trace = Trace(
             query_id=query_id,
             question=question,
             config={
-                "chunker": self.chunkset.strategy,
-                "chunker_params": self.chunkset.params,
+                "chunker": info.get("chunker"),
+                "chunker_params": info.get("chunker_params"),
                 "embedder": self.embedder.name,
                 "reranker": self.reranker.name if (config.rerank and self.reranker) else None,
                 "retrieval": asdict(config),
             },
         )
-        lists: List[List[Tuple[int, float]]] = []
+        by_id: Dict[str, Chunk] = {}
+
+        def keyed(results: List[Tuple[Chunk, float]]) -> List[Tuple[str, float]]:
+            for chunk, _ in results:
+                by_id[chunk.chunk_id] = chunk
+            return [(chunk.chunk_id, score) for chunk, score in results]
+
+        def hits(scored: Sequence[Tuple[str, float]]) -> List[Hit]:
+            return [hit_from_chunk(by_id[cid], rank, score) for rank, (cid, score) in enumerate(scored, start=1)]
+
+        lists: List[List[Tuple[str, float]]] = []
         if config.dense:
-            scored = dense_search(self.vector_index, self.embedder, question, config.candidates)
-            trace.record("dense", "retrieve", self._hits(scored))
+            vector = self.embedder.embed_query(question)
+            scored = keyed(dense_search(store, vector, config.candidates, scope))
+            trace.record("dense", "retrieve", hits(scored))
             lists.append(scored)
         if config.bm25:
-            scored = keyword_search(self.bm25_index, question, config.candidates)
-            trace.record("bm25", "retrieve", self._hits(scored))
+            scored = keyed(keyword_search(store, question, config.candidates, scope))
+            trace.record("bm25", "retrieve", hits(scored))
             lists.append(scored)
 
         if len(lists) == 2:
@@ -82,25 +101,30 @@ class RetrievalPipeline:
             else:
                 raise ValueError(f"unknown fusion {config.fusion!r}")
             merged = merged[: config.fused_k]
-            trace.record("fuse", "transform", self._hits(merged), method=config.fusion)
+            trace.record("fuse", "transform", hits(merged), method=config.fusion)
         else:
             merged = lists[0][: config.fused_k]
 
         if config.rerank:
             if not self.reranker:
                 raise ValueError(f"config {config.name!r} wants a reranker but none was given")
-            texts = [self.chunks[row].text for row, _ in merged]
+            texts = [by_id[cid].text for cid, _ in merged]
             new_scores = self.reranker.score(question, texts)
             order = sorted(range(len(merged)), key=lambda i: new_scores[i], reverse=True)
             merged = [(merged[i][0], new_scores[i]) for i in order]
-            trace.record("rerank", "transform", self._hits(merged))
+            trace.record("rerank", "transform", hits(merged))
 
+        parent_ids = [c.meta["parent_id"] for c in by_id.values() if "parent_id" in c.meta]
+        parents = store.get_parents(parent_ids, scope) if parent_ids and config.use_parents else {}
+        # With one document in scope there is nothing to flood, so the per-source cap would only
+        # cut a legitimate document down to a few passages.
+        single_document = len(store.document_ids(scope)) == 1
         context = select_context(
-            self._hits(merged, keep_text=True),
-            self.by_id,
-            self.chunkset.parents,
+            hits(merged),
+            by_id,
+            parents,
             ContextConfig(config.top_k, config.max_words, use_parents=config.use_parents,
-                          scan=config.scan, max_per_source=config.max_per_source),
+                          scan=config.scan, max_per_source=0 if single_document else config.max_per_source),
         )
         trace.record("context", "transform", context)
         return trace
