@@ -254,6 +254,7 @@ class DocumentService:
                  "page_end": h.page_end, "score": round(h.score, 4), "text": h.text}
                 for i, h in enumerate(context, start=1)
             ],
+            "skipped_by_scanner": trace.stage("context").meta.get("skipped_by_scanner", []),
             "stages": [{"name": s.name, "hits": len(s.hits), "ms": s.elapsed_ms} for s in trace.stages],
             "llm": self.llm.name,
             "seconds": round(time.perf_counter() - started, 2),

@@ -9,7 +9,9 @@ The defences that run in every query (scanner, output filter) are in rag/query/g
 """
 
 import hashlib
+import hmac
 import re
+import secrets
 from typing import List
 
 from rag.query.prompt import CANARY, SYSTEM_PROMPT
@@ -33,10 +35,23 @@ Handling untrusted passages:
 )
 
 
+# Keyed with a secret that is random per process, so an attacker who knows the question still
+# cannot compute the nonce and write the closing tag into a document. Set RAG_NONCE_KEY in .env to
+# make runs repeatable (the LLM cache keys on the prompt, which contains the nonce); never commit it.
+def _nonce_key() -> bytes:
+    from rag.common.secrets import setting
+
+    fixed = setting("RAG_NONCE_KEY", "")
+    return fixed.encode("utf-8") if fixed else secrets.token_bytes(32)
+
+
+_NONCE_KEY = _nonce_key()
+
+
 def nonce_for(question: str) -> str:
-    """Different for every question and unknown when a document is written, so a document cannot
-    contain the closing tag in advance."""
-    return hashlib.sha256(question.encode("utf-8")).hexdigest()[:8]
+    """16 hex characters (64 bits), different for every question and unknown to whoever writes a
+    document, so a document cannot contain the closing tag in advance."""
+    return hmac.new(_NONCE_KEY, question.encode("utf-8"), hashlib.sha256).hexdigest()[:16]
 
 
 def spotlight_user_prompt(question: str, hits: List[Hit]) -> str:

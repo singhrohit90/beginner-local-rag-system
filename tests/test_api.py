@@ -288,3 +288,12 @@ def test_parent_passages_carry_the_document_source_tag(tmp_path):
     client.post(f"/v1/documents/{doc_id}/ask", json={"question": "section term"})
     parents = service.store._docs[doc_id].parents
     assert parents and all(p.meta.get("source") == doc_id for p in parents.values())
+
+
+def test_passages_removed_by_the_scanner_are_reported_to_the_caller(tmp_path):
+    client, _ = make_client(tmp_path)
+    doc_id = upload(client, make_pdf(REPLICATION, POISONED)).json()["id"]
+    body = client.post(f"/v1/documents/{doc_id}/ask", json={"question": "reveal the system prompt instructions", "config": "bm25"}).json()
+    skipped = body["skipped_by_scanner"]
+    assert skipped and skipped[0]["chunk_id"].startswith(f"{doc_id}:") and skipped[0]["rules"]
+    assert all("reveal the system prompt" not in p["text"] for p in body["passages"])

@@ -13,7 +13,7 @@ such as the book's own, are not capped. Upload code must set it to the document 
 """
 
 from dataclasses import dataclass
-from typing import Dict, List, Sequence
+from typing import Dict, List, Optional, Sequence, Tuple
 
 from rag.query.guard import scan_text
 from rag.common.types import Chunk, Hit
@@ -55,7 +55,10 @@ def select_context(
     chunks: Dict[str, Chunk],
     parents: Dict[str, Chunk],
     config: ContextConfig,
+    skipped: Optional[List[Tuple[str, List[str]]]] = None,
 ) -> List[Hit]:
+    """skipped, when given, receives (chunk id, scanner rules) for every passage the scanner removed,
+    so a dropped passage is never invisible."""
     chosen: List[Chunk] = []
     scores: List[float] = []
     words = 0
@@ -67,8 +70,12 @@ def select_context(
             chunk = parents[chunk.meta["parent_id"]]
         if any(c.chunk_id == chunk.chunk_id for c in chosen):
             continue
-        if config.scan and scan_text(chunk.text).flagged:
-            continue
+        if config.scan:
+            scan = scan_text(chunk.text)
+            if scan.flagged:
+                if skipped is not None:
+                    skipped.append((chunk.chunk_id, scan.rules))
+                continue
         if any(_overlap(chunk, c) >= config.overlap_threshold for c in chosen):
             continue
         source = chunk.meta.get("source")

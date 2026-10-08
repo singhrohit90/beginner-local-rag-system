@@ -20,24 +20,41 @@ from rag.query.prompt import CANARY
 _FLAGS = re.IGNORECASE
 
 RULES: Dict[str, "re.Pattern[str]"] = {
+    # Each rule names a phrase an attacker writes AT the model. Plain technical words such as
+    # "model", "system message" or "override the default rules" must not match: a data-systems or
+    # machine-learning document uses them all the time, and a flagged passage is dropped.
     "ignore-previous": re.compile(
-        r"\b(ignore|disregard|forget|override)\b.{0,25}\b(previous|prior|above|earlier|all|the)\b"
-        r".{0,25}\b(instructions?|rules?|guidance|prompts?)\b", _FLAGS),
+        r"\b(ignore|disregard|forget|override)\b.{0,25}"
+        r"\b(previous|prior|above|earlier|all|any|your|these|those|system)\b"
+        r".{0,25}\b(instructions?|rules?|guidance|prompts?|directions?)\b"
+        r"|\b(ignore|disregard|forget)\b.{0,15}\b(rules?|instructions?|guidance)\b.{0,12}"
+        r"\b(above|earlier|before|previous)\b", _FLAGS),
     "role-notice": re.compile(
-        r"\b(system|internal|admin(istrator)?|developer|editorial)\s+"
-        r"(notice|instruction|message|prompt|override|policy|rule)\b", _FLAGS),
+        r"\b(system|developer|admin(istrator)?|editorial)\s+(notice|override)\b"
+        r"|\b(admin(istrator)?|developer|editorial)\s+(instructions?|note)\b"
+        r"|\bnew\s+system\s+instructions?\b"
+        r"|\b(system|developer|admin(istrator)?|editorial|internal)\s+(rule|policy|requirement)s?\s+"
+        r"(\d+|requires?|states?)\b", _FLAGS),
+    "role-notice-shouted": re.compile(  # case sensitive: SYSTEM NOTICE:, INTERNAL POLICY:
+        r"\b(SYSTEM|INTERNAL|ADMIN|DEVELOPER|EDITORIAL)\s+(NOTICE|POLICY|INSTRUCTIONS?|OVERRIDE|MESSAGE|RULE)\b"),
     "address-the-model": re.compile(
-        r"\b(for|to)\s+(the\s+)?(ai|assistant|llm|model|chatbot)s?\b|\bai assistants?\b", _FLAGS),
+        r"\b(note|notice|message|instructions?|attention|reminder)\s+(for|to)\s+(the\s+)?"
+        r"(ai|llm|assistants?|chatbot|language model)s?\b"
+        r"|\bdear\s+(ai|assistant|llm|model)\b"
+        r"|\b(ai|llm)\s+assistants?,?\s+(you\s+must|please|do\s+not|ignore|always)\b", _FLAGS),
     "output-directive": re.compile(
-        r"\b(begin|start|open|end|finish|append|prefix)\b.{0,30}\b(your|the)\s+"
-        r"(answer|reply|response|output)\b", _FLAGS),
-    "reply-only": re.compile(r"\b(reply|respond|answer|write)\s+(only|exclusively)\b", _FLAGS),
+        r"\b(begin|start|open|end|finish|append|prefix)\b.{0,20}\b(your|every|each)\s+"
+        r"(answer|reply|response|output)s?\b", _FLAGS),
+    "reply-only": re.compile(r"\b(reply|respond|answer)\s+(only|exclusively)\s+with\b", _FLAGS),
     "reveal-prompt": re.compile(
-        r"\b(print|reveal|repeat|output|show)\b.{0,40}\b(system (prompt|instructions?)|"
-        r"internal reference)\b", _FLAGS),
-    "exfil-image-or-link": re.compile(r"!\[[^\]]*\]\(https?://[^)]*\)|https?://\S+\?\S*=", _FLAGS),
+        r"\b(print|reveal|repeat|output|show|disclose)\w*\b.{0,40}\b(your|the)\s+(full\s+|complete\s+)?"
+        r"system\s+(prompt|instructions?)\b|\binternal reference value\b", _FLAGS),
+    "exfil-image-or-link": re.compile(
+        r"!\[[^\]]*\]\(https?://[^)]*\)"  # a markdown image from outside
+        r"|https?://\S+[?&](data|q|query|answer|prompt|token|key|secret|session|payload)=", _FLAGS),
     "fake-boundary": re.compile(r"-{2,}\s*(end|begin)\s+of\s+(passages|context)", _FLAGS),
-    "spoofed-citation": re.compile(r"\[S\d+\]"),
+    "spoofed-citation": re.compile(
+        r"\b(verified|confirmed|endorsed|approved|cited)\b.{0,40}\[S\d+\]", _FLAGS),
 }
 
 

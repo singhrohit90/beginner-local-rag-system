@@ -175,7 +175,12 @@ function detail(r) {
   box.append(el("div", { class: "meta" }, `${r.llm} · ${r.seconds}s · cited: ${r.citations.join(", ") || "none"}`));
   const table = el("table", {}, el("tr", {}, el("th", {}, "stage"), el("th", {}, "hits"), el("th", {}, "ms")));
   for (const s of r.stages) table.append(el("tr", {}, el("td", {}, s.name), el("td", {}, String(s.hits)), el("td", {}, String(s.ms))));
-  box.append(el("h2", {}, "Stages"), table, el("h2", {}, "Passages sent to the model"));
+  box.append(el("h2", {}, "Stages"), table);
+  if (r.skipped_by_scanner.length) {
+    box.append(el("h2", {}, "Skipped by the scanner"));
+    for (const s of r.skipped_by_scanner) box.append(el("div", { class: "meta" }, `${s.chunk_id}: ${s.rules.join(", ")}`));
+  }
+  box.append(el("h2", {}, "Passages sent to the model"));
   for (const p of r.passages) {
     const pages = p.page_start === p.page_end ? "p. " + p.page_start : `pp. ${p.page_start}-${p.page_end}`;
     box.append(el("div", { class: "passage" + (r.citations.includes(p.label) ? " cited" : "") },

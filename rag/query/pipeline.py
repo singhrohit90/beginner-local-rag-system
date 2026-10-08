@@ -119,6 +119,7 @@ class RetrievalPipeline:
         # With one document in scope there is nothing to flood, so the per-source cap would only
         # cut a legitimate document down to a few passages.
         single_document = len(store.document_ids(scope)) == 1
+        skipped: List[Tuple[str, List[str]]] = []
         context = select_context(
             hits(merged),
             by_id,
@@ -126,8 +127,10 @@ class RetrievalPipeline:
             ContextConfig(config.top_k, config.max_words, use_parents=config.use_parents,
                           scan=config.scan, max_per_source=0 if single_document else config.max_per_source,
                           drop_exact_copies=config.drop_exact_copies),
+            skipped,
         )
-        trace.record("context", "transform", context)
+        trace.record("context", "transform", context,
+                     skipped_by_scanner=[{"chunk_id": cid, "rules": rules} for cid, rules in skipped])
         return trace
 
 
