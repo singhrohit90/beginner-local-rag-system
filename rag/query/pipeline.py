@@ -1,43 +1,32 @@
-"""The query path up to, but not including, the LLM. Each stage writes its output to the trace.
+"""The query pipeline. These classes only decide the order and what to skip; each step is a module.
 
-    question -> dense search --+
-                               +--> fuse -> rerank -> select context
-    question -> BM25 search ---+
+    question -> dense_search --+
+                               +--> fuse -> rerank -> select_context -> generate -> guard
+    question -> keyword_search +
+                                 retrieve.py  fusion.py  rerank.py  select_context.py  generate.py  guard.py
 
-Stage names in the trace: dense, bm25, fuse, rerank, context. A config can switch stages off, and
-a stage that is off leaves no trace entry, so the eval harness scores only what actually ran.
+RetrievalPipeline runs up to select_context. RagPipeline adds generate and the output guard.
+Every step writes to the Trace, with stage names dense, bm25, fuse, rerank and context. A config can
+switch a stage off, and a stage that is off leaves no trace entry, so the eval scores only what ran.
 """
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict
 from typing import Dict, List, Optional, Sequence, Tuple
 
-from rag.ingestion.chunking.base import ChunkSet
-from rag.common.embed import Embedder
-from rag.query import fusion
 from rag.common.bm25 import BM25Index
-from rag.query.rerank import Reranker
-from rag.query.select_context import ContextConfig, hit_from_chunk, select_context
+from rag.common.embed import Embedder
+from rag.common.llm import LLM
 from rag.common.store import VectorIndex
 from rag.common.trace import Trace
 from rag.common.types import Chunk, Hit
-
-
-@dataclass
-class RetrievalConfig:
-    name: str
-    dense: bool = True
-    bm25: bool = True
-    fusion: str = "rrf"  # "rrf" or "weighted"; ignored when only one retriever is on
-    weights: Tuple[float, float] = (0.7, 0.3)  # (dense, bm25) for weighted fusion
-    rrf_k: int = 60
-    candidates: int = 30  # taken from each retriever
-    fused_k: int = 30  # kept after fusion and sent to the reranker
-    rerank: bool = False
-    top_k: int = 5  # passages in the final context
-    max_words: int = 1500
-    use_parents: bool = True
-    scan: bool = True  # context selection skips passages flagged by rag.security.scan
-    max_per_source: int = 2  # cap on passages per source document; 0 = off
+from rag.ingestion.chunking.base import ChunkSet
+from rag.query import fusion
+from rag.query.configs import RetrievalConfig
+from rag.query.generate import answer_from_context
+from rag.query.guard import filter_output
+from rag.query.rerank import Reranker
+from rag.query.retrieve import dense_search, keyword_search
+from rag.query.select_context import ContextConfig, hit_from_chunk, select_context
 
 
 class RetrievalPipeline:
@@ -77,11 +66,11 @@ class RetrievalPipeline:
         )
         lists: List[List[Tuple[int, float]]] = []
         if config.dense:
-            scored = self.vector_index.search(self.embedder.embed_query(question), config.candidates)
+            scored = dense_search(self.vector_index, self.embedder, question, config.candidates)
             trace.record("dense", "retrieve", self._hits(scored))
             lists.append(scored)
         if config.bm25:
-            scored = self.bm25_index.search(question, config.candidates)
+            scored = keyword_search(self.bm25_index, question, config.candidates)
             trace.record("bm25", "retrieve", self._hits(scored))
             lists.append(scored)
 
@@ -114,4 +103,41 @@ class RetrievalPipeline:
                           scan=config.scan, max_per_source=config.max_per_source),
         )
         trace.record("context", "transform", context)
+        return trace
+
+
+class RagPipeline:
+    """Retrieval followed by generation. The trace carries both halves, so a wrong answer can be
+    traced to the stage that caused it."""
+
+    def __init__(self, retrieval: RetrievalPipeline, llm: LLM, style: str = "standard",
+                 output_filter: bool = True):
+        self.retrieval = retrieval
+        self.llm = llm
+        self.style = style  # prompt style, see rag.query.generate.answer_from_context
+        self.output_filter = output_filter  # withhold answers that show signs of a hijack
+
+    def run(self, query_id: str, question: str, config: RetrievalConfig) -> Trace:
+        return self.answer(self.retrieval.run(query_id, question, config))
+
+    def answer(self, trace: Trace) -> Trace:
+        """Generate from the context already recorded in a retrieval trace."""
+        question = trace.question
+        context = trace.stage("context").hits
+        answer, prompt = answer_from_context(self.llm, question, context, style=self.style)
+        trace.config["prompt_style"] = self.style
+        trace.prompt = prompt
+        trace.answer = answer.text
+        blocked: List[str] = []
+        if self.output_filter:
+            result = filter_output(answer.text, " ".join(h.text for h in context))
+            trace.answer, blocked = result.answer, result.reasons
+        trace.citations = [f"S{n}" for n in answer.cited]
+        trace.config["llm"] = self.llm.name
+        trace.config["usage"] = {
+            "prompt_tokens": answer.prompt_tokens,
+            "output_tokens": answer.output_tokens,
+            "abstained": answer.abstained,
+            "blocked": blocked,
+        }
         return trace

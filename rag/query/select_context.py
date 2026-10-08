@@ -15,7 +15,7 @@ such as the book's own, are not capped. Upload code must set it to the document 
 from dataclasses import dataclass
 from typing import Dict, List, Sequence
 
-from rag.security.scan import scan_text
+from rag.query.guard import scan_text
 from rag.common.types import Chunk, Hit
 
 

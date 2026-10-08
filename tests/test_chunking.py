@@ -179,3 +179,14 @@ def test_stats_and_evidence_intact(doc):
     assert report["rate"] == 1.0
     tiny = evidence_intact(FixedChunker(size=3, overlap=0).chunk(doc).chunks, [q_split], page_texts)
     assert tiny["failed"] == ["b"]
+
+
+def test_make_chunker_picks_a_strategy_by_name():
+    from rag.ingestion.chunk import make_chunker
+
+    assert type(make_chunker("fixed", size=50)).__name__ == "FixedChunker"
+    assert type(make_chunker("heading", max_words=120)).__name__ == "HeadingChunker"
+    with pytest.raises(ValueError, match="needs an embedder"):
+        make_chunker("semantic")
+    with pytest.raises(ValueError, match="unknown chunking strategy"):
+        make_chunker("nope")

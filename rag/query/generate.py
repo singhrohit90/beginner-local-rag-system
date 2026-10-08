@@ -4,8 +4,6 @@ from typing import List, Sequence
 
 from rag.query.prompt import ABSTAIN, SYSTEM_PROMPT, build_user_prompt
 from rag.common.llm import LLM
-from rag.query.pipeline import RetrievalConfig, RetrievalPipeline
-from rag.common.trace import Trace
 from rag.common.types import Hit
 
 _CITATION = re.compile(r"\[S(\d+)\]")
@@ -75,42 +73,3 @@ def answer_from_context(
         ),
         user_prompt,
     )
-
-
-class RagPipeline:
-    """Retrieval followed by generation. The trace carries both halves, so a wrong answer can be
-    traced to the stage that caused it."""
-
-    def __init__(self, retrieval: RetrievalPipeline, llm: LLM, style: str = "standard",
-                 output_filter: bool = True):
-        self.retrieval = retrieval
-        self.llm = llm
-        self.style = style  # prompt style, see answer_from_context
-        self.output_filter = output_filter  # withhold answers that show signs of a hijack
-
-    def run(self, query_id: str, question: str, config: RetrievalConfig) -> Trace:
-        return self.answer(self.retrieval.run(query_id, question, config))
-
-    def answer(self, trace: Trace) -> Trace:
-        """Generate from the context already recorded in a retrieval trace."""
-        question = trace.question
-        context = trace.stage("context").hits
-        answer, prompt = answer_from_context(self.llm, question, context, style=self.style)
-        trace.config["prompt_style"] = self.style
-        trace.prompt = prompt
-        trace.answer = answer.text
-        blocked: List[str] = []
-        if self.output_filter:
-            from rag.security.defenses import filter_output
-
-            result = filter_output(answer.text, " ".join(h.text for h in context))
-            trace.answer, blocked = result.answer, result.reasons
-        trace.citations = [f"S{n}" for n in answer.cited]
-        trace.config["llm"] = self.llm.name
-        trace.config["usage"] = {
-            "prompt_tokens": answer.prompt_tokens,
-            "output_tokens": answer.output_tokens,
-            "abstained": answer.abstained,
-            "blocked": blocked,
-        }
-        return trace

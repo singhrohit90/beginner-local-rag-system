@@ -31,7 +31,8 @@ import numpy as np
 from rag.ingestion.chunking.base import ChunkSet, load_chunkset
 from rag.common.config import PROCESSED_DIR, RUNS_DIR
 from rag.common.embed import Embedder, get_embedder
-from rag.experiments.retrieval import CONFIGS, get_index
+from rag.ingestion.index import get_index
+from rag.query.configs import CONFIGS
 from rag.query.generate import answer_from_context, looks_like_abstention
 from rag.common.llm import get_llm
 from rag.common.log import setup_logging
@@ -39,9 +40,10 @@ from rag.common.secrets import setting
 from rag.common.bm25 import BM25Index
 from rag.query.pipeline import RetrievalPipeline
 from rag.common.store import VectorIndex
-from rag.security.defenses import classify, filter_output
+from rag.security.defenses import classify
+from rag.query.guard import filter_output
 from rag.security.fixtures import POISONED_DOCS, PoisonedDoc
-from rag.security.scan import scan_chunks, scan_text
+from rag.query.guard import scan_chunks, scan_text
 from rag.common.types import Chunk
 
 logger = logging.getLogger("rag.security")

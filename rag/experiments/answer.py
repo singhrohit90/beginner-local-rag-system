@@ -21,8 +21,9 @@ from rag.common.config import GOLDEN_DIR, PROCESSED_DIR, RUNS_DIR
 from rag.common.embed import get_embedder
 from rag.observe.generation_quality.answers import aggregate, score_answer
 from rag.observe.golden import load_golden
-from rag.experiments.retrieval import CONFIGS, get_index
-from rag.query.generate import RagPipeline
+from rag.ingestion.index import get_index
+from rag.query.configs import CONFIGS
+from rag.query.pipeline import RagPipeline
 from rag.common.llm import get_llm
 from rag.common.log import setup_logging
 from rag.common.secrets import setting

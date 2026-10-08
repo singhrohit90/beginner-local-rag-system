@@ -28,37 +28,14 @@ from rag.observe.golden import load_golden
 from rag.observe.retrieval_quality.run_eval import run_eval
 from rag.common.log import setup_logging
 from rag.common.bm25 import BM25Index
-from rag.query.pipeline import RetrievalConfig, RetrievalPipeline
+from rag.ingestion.index import get_index
+from rag.query.configs import CONFIGS
+from rag.query.pipeline import RetrievalPipeline
 from rag.query.rerank import CrossEncoderReranker, Reranker
-from rag.common.store import VectorIndex, index_dir
 
 logger = logging.getLogger("rag.experiments.retrieval")
 
-CONFIGS: Dict[str, RetrievalConfig] = {
-    "dense": RetrievalConfig("dense", bm25=False),
-    "bm25": RetrievalConfig("bm25", dense=False),
-    "rrf": RetrievalConfig("rrf", fusion="rrf"),
-    "weighted": RetrievalConfig("weighted", fusion="weighted"),
-    "dense_rerank": RetrievalConfig("dense_rerank", bm25=False, rerank=True),
-    "rrf_rerank": RetrievalConfig("rrf_rerank", fusion="rrf", rerank=True),
-}
 KS = (1, 3, 5, 10, 30)
-
-
-def get_index(chunkset, embedder, variant: str, rebuild: bool) -> VectorIndex:
-    directory = index_dir(chunkset.strategy, embedder.name, variant)
-    if directory.exists() and not rebuild:
-        index = VectorIndex.load(directory)
-        if index.matches(chunkset.chunks):
-            return index
-    text_of = (
-        (lambda c: f"{c.section}\n{c.text}" if c.section else c.text)
-        if variant == "heading"
-        else (lambda c: c.text)
-    )
-    index = VectorIndex.build(chunkset.chunks, embedder, text_of, variant=variant)
-    index.save(directory)
-    return index
 
 
 def summarise(report: Dict[str, Any]) -> Dict[str, Any]:

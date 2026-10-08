@@ -14,13 +14,7 @@ import logging
 from pathlib import Path
 from typing import Any, Dict, List
 
-from rag.ingestion.chunking import (
-    FixedChunker,
-    HeadingChunker,
-    ParentChildChunker,
-    RecursiveChunker,
-    SemanticChunker,
-)
+from rag.ingestion.chunk import STRATEGIES, make_chunker
 from rag.ingestion.chunking.document import Document
 from rag.ingestion.chunking.stats import chunk_stats, evidence_intact, format_table
 from rag.common.config import GOLDEN_DIR, PROCESSED_DIR
@@ -28,20 +22,6 @@ from rag.common.embed import get_embedder
 from rag.observe.golden import load_golden
 
 DEFAULT_STRATEGIES = "fixed,recursive,heading,parent_child"
-
-
-def make_chunker(name: str, args: argparse.Namespace):
-    if name == "fixed":
-        return FixedChunker(size=args.size, overlap=args.overlap)
-    if name == "recursive":
-        return RecursiveChunker(size=args.size, overlap=args.overlap)
-    if name == "heading":
-        return HeadingChunker(max_words=args.max_words)
-    if name == "parent_child":
-        return ParentChildChunker(child_size=args.child_size)
-    if name == "semantic":
-        return SemanticChunker(get_embedder(args.embedder), max_words=args.max_words)
-    raise SystemExit(f"unknown strategy {name!r}")
 
 
 def main() -> None:
@@ -69,7 +49,10 @@ def main() -> None:
 
     rows: List[Dict[str, Any]] = []
     for name in [s.strip() for s in args.strategies.split(",") if s.strip()]:
-        result = make_chunker(name, args).chunk(doc)
+        result = make_chunker(
+            name, size=args.size, overlap=args.overlap, max_words=args.max_words,
+            child_size=args.child_size, embedder=get_embedder(args.embedder) if name == "semantic" else None,
+        ).chunk(doc)
         result.save(args.out)
         rows.append(
             {

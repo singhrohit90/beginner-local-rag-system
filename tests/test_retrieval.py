@@ -9,7 +9,8 @@ from rag.observe.golden import GoldQuestion
 from rag.observe.retrieval_quality.run_eval import run_eval
 from rag.query import fusion
 from rag.common.bm25 import BM25Index, tokenize
-from rag.query.pipeline import RetrievalConfig, RetrievalPipeline
+from rag.query.configs import RetrievalConfig
+from rag.query.pipeline import RetrievalPipeline
 from rag.query.rerank import KeywordOverlapReranker
 from rag.query.select_context import ContextConfig, hit_from_chunk, select_context
 from rag.common.store import VectorIndex
