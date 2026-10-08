@@ -7,12 +7,12 @@ can be measured and every wrong answer can be traced to a stage.
 
 | Step | Module | State |
 |------|--------|-------|
-| 1 | `rag/ingest` PDF extraction and cleaning | done |
-| 2 | `rag/eval/golden.py` golden question format | done, questions still to be written |
-| 3 | `rag/trace.py`, `rag/eval/{metrics,diagnose,run_eval}.py` | done |
-| 4 | `rag/chunking` fixed, recursive, semantic, heading-aware, parent-child | done; semantic still to be built with a real embedder |
-| 5 | `rag/retrieval` dense, BM25, fusion, rerank, context selection; `rag/experiment.py` | done, no LLM yet |
-| 6 | `rag/generation`, `rag/llm.py`, `rag/eval/{judge,answers}.py`, `rag/answer_experiment.py` | done; judge is a local model |
+| 1 | `rag/ingestion` PDF extraction and cleaning | done |
+| 2 | `rag/observe/golden.py` golden question format | done, questions still to be written |
+| 3 | `rag/common/trace.py`, `rag/eval/{metrics,diagnose,run_eval}.py` | done |
+| 4 | `rag/ingestion/chunking` fixed, recursive, semantic, heading-aware, parent-child | done; semantic still to be built with a real embedder |
+| 5 | `rag/retrieval` dense, BM25, fusion, rerank, context selection; `rag/experiments/retrieval.py` | done, no LLM yet |
+| 6 | `rag/generation`, `rag/common/llm.py`, `rag/eval/{judge,answers}.py`, `rag/experiments/answer.py` | done; judge is a local model |
 | 7 | security tests (injection, poisoning, access control) | |
 
 ## Setup
@@ -24,7 +24,7 @@ can be measured and every wrong answer can be traced to a stage.
 
 Put the PDF in `data/raw/` (gitignored, do not commit it), then:
 
-    python -m rag.ingest.extract data/raw/ddia.pdf
+    python -m rag.ingestion.extract data/raw/ddia.pdf
 
 This writes `data/processed/ddia.pages.jsonl`, one cleaned page per line, and `ddia.toc.json`, the
 PDF's own bookmarks (level, title, PDF page) for the heading-aware chunker. Page numbers are PDF
@@ -32,7 +32,7 @@ page indexes (1-based), not the numbers printed on the page. Use the same number
 
 Check the output by eye before trusting it: open the jsonl, read 10 pages from different
 chapters, and look for leftover headers, footnotes mixed into body text, and garbled code or
-tables. Tune `HEADER_FRACTION`, `FOOTER_FRACTION` and `REPEAT_THRESHOLD` in `rag/config.py`.
+tables. Tune `HEADER_FRACTION`, `FOOTER_FRACTION` and `REPEAT_THRESHOLD` in `rag/common/config.py`.
 
 ## Step 2: write the golden set
 
@@ -44,7 +44,7 @@ File: `data/golden/ddia_questions.jsonl`, one JSON object per line.
 - `type` is one of: factual, exact_term, paraphrase, multi_chunk, comparison, unanswerable, attack.
 - `gold_pages` are inclusive PDF page ranges. Use several ranges for multi_chunk questions.
 - Unanswerable and attack questions have `"answerable": false` and no gold pages.
-- Find pages with `python -m rag.eval.find_pages data/processed/ddia.pages.jsonl "term"`.
+- Find pages with `python -m rag.observe.golden_tools.find_pages data/processed/ddia.pages.jsonl "term"`.
 
 Rules that keep the eval honest:
 
@@ -58,8 +58,8 @@ Rules that keep the eval honest:
 
 ## Step 4: chunk the book and compare strategies
 
-    python -m rag.chunking.build                        # fixed, recursive, heading, parent_child
-    python -m rag.chunking.build --strategies semantic --embedder st:sentence-transformers/all-mpnet-base-v2
+    python -m rag.ingestion.chunking.build                        # fixed, recursive, heading, parent_child
+    python -m rag.ingestion.chunking.build --strategies semantic --embedder st:sentence-transformers/all-mpnet-base-v2
 
 The body is PDF pages 23 to 574. The glossary and index are left out because they repeat technical
 terms beside page numbers and would match keyword queries without holding an answer. Chunk sizes
@@ -75,11 +75,11 @@ Semantic chunking needs the extras: `pip install sentence-transformers` (pulls i
 
 ## Step 5: retrieval experiments
 
-    python -m rag.experiment                              # dense, bm25, rrf, weighted for all chunkers
-    python -m rag.experiment --configs dense_rerank,rrf_rerank
-    python -m rag.experiment --chunkers recursive --variant heading --rebuild
+    python -m rag.experiments.retrieval                              # dense, bm25, rrf, weighted for all chunkers
+    python -m rag.experiments.retrieval --configs dense_rerank,rrf_rerank
+    python -m rag.experiments.retrieval --chunkers recursive --variant heading --rebuild
 
-Each stage is its own module in `rag/retrieval/`: `store.py` (numpy vectors, exact cosine search),
+Each stage is its own module in `rag/query/`: `store.py` (numpy vectors, exact cosine search),
 `bm25.py`, `fusion.py` (RRF and weighted min-max), `rerank.py` (cross-encoder), `select.py` (dedupe,
 parents, word budget) and `pipeline.py`, which calls them in order and records each stage in the
 trace. Embeddings are cached in `data/processed/index/`.
@@ -95,13 +95,13 @@ how many chunks of each strategy are affected.
 
 ## Step 6: generation and answer evaluation
 
-    python -m rag.answer_experiment --chunker semantic --config weighted \
+    python -m rag.experiments.answer --chunker semantic --config weighted \
         --llm gemini:gemini-3.5-flash-lite --judge ollama:qwen2.5:7b
-    python -m rag.answer_experiment --judge none          # only abstention, attack and citation checks
-    python -m rag.eval.calibrate_judge --judge ollama:qwen2.5:7b
+    python -m rag.experiments.answer --judge none          # only abstention, attack and citation checks
+    python -m rag.observe.generation_quality.calibrate_judge --judge ollama:qwen2.5:7b
 
 The generator and the judge are chosen with `--llm` and `--judge`, in the form `gemini:<model>`,
-`ollama:<model>` or `fake`. Only `rag/llm.py` knows how a provider is called. Put the Gemini key in
+`ollama:<model>` or `fake`. Only `rag/common/llm.py` knows how a provider is called. Put the Gemini key in
 `.env` as `GEMINI_API_KEY=...` (the file is gitignored). Replies are cached in
 `data/processed/llm_cache/`, so a rerun with the same prompts is free and identical.
 
@@ -125,7 +125,7 @@ sample of verdicts, and rerun the calibration whenever the judge model or prompt
 
     python -m rag.security.indirect                              # Gemini generator, all defences
     python -m rag.security.indirect --llm ollama:qwen2.5:7b --copies 3
-    python -m rag.answer_experiment --style spotlight --judge ollama:qwen2.5:7b   # cost on normal questions
+    python -m rag.experiments.answer --style spotlight --judge ollama:qwen2.5:7b   # cost on normal questions
 
 `rag/security/fixtures.py` holds ten poisoned documents (override, prompt leak, exfiltration image,
 false fact, denial, fake boundary, French, paraphrase, code comment, spoofed authority). For each,
@@ -134,7 +134,7 @@ classed as `obeyed`, `reported` (the model flagged it), `none` or `blocked`. `--
 document three times to flood the context.
 
 Defences, each switchable on its own: `naive` (a prompt with no injection rules, the baseline),
-`none` (the production prompt in `rag/generation/prompt.py`), `scan` (keyword scanner at ingestion),
+`none` (the production prompt in `rag/query/prompt.py`), `scan` (keyword scanner at ingestion),
 `spotlight` (nonce-tagged passages plus a reminder), `output_filter` (blocks the canary, system
 prompt echoes, external images and URLs not in the context) and `all`.
 
@@ -160,8 +160,8 @@ A pipeline is `GoldQuestion -> Trace`. Inside, call `trace.record(name, kind, hi
 stage, with `kind="retrieve"` for dense and BM25 and `kind="transform"` for fuse, rerank and
 context selection.
 
-    from rag.eval.golden import load_golden
-    from rag.eval.run_eval import run_eval, print_report
+    from rag.observe.golden import load_golden
+    from rag.observe.retrieval_quality.run_eval import run_eval, print_report
 
     report = run_eval(load_golden(path), my_pipeline, run_name="fixed_dense_only")
     print_report(report)

@@ -1,19 +1,19 @@
 import numpy as np
 import pytest
 
-from rag.chunking import RecursiveChunker, ParentChildChunker
-from rag.chunking.base import load_chunkset
-from rag.chunking.document import Document
-from rag.embed import HashingEmbedder
-from rag.eval.golden import GoldQuestion
-from rag.eval.run_eval import run_eval
-from rag.retrieval import fusion
-from rag.retrieval.bm25 import BM25Index, tokenize
-from rag.retrieval.pipeline import RetrievalConfig, RetrievalPipeline
-from rag.retrieval.rerank import KeywordOverlapReranker
-from rag.retrieval.select import ContextConfig, hit_from_chunk, select_context
-from rag.retrieval.store import VectorIndex
-from rag.types import Chunk, Page
+from rag.ingestion.chunking import RecursiveChunker, ParentChildChunker
+from rag.ingestion.chunking.base import load_chunkset
+from rag.ingestion.chunking.document import Document
+from rag.common.embed import HashingEmbedder
+from rag.observe.golden import GoldQuestion
+from rag.observe.retrieval_quality.run_eval import run_eval
+from rag.query import fusion
+from rag.common.bm25 import BM25Index, tokenize
+from rag.query.pipeline import RetrievalConfig, RetrievalPipeline
+from rag.query.rerank import KeywordOverlapReranker
+from rag.query.select_context import ContextConfig, hit_from_chunk, select_context
+from rag.common.store import VectorIndex
+from rag.common.types import Chunk, Page
 
 
 def make_chunk(i, text, page=1, span=None):

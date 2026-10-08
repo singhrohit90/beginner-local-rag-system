@@ -2,19 +2,19 @@ import json
 
 import pytest
 
-from rag.eval.answers import aggregate, score_answer
-from rag.eval.golden import GoldQuestion
-from rag.eval.judge import judge_correctness, judge_faithfulness, parse_json
-from rag.generation.answer import (
+from rag.observe.generation_quality.answers import aggregate, score_answer
+from rag.observe.golden import GoldQuestion
+from rag.observe.generation_quality.judge import judge_correctness, judge_faithfulness, parse_json
+from rag.query.generate import (
     RagPipeline,
     citation_is_valid,
     looks_like_abstention,
     parse_citations,
 )
-from rag.generation.prompt import ABSTAIN, CANARY, SYSTEM_PROMPT, build_user_prompt, format_context
-from rag.llm import CachedLLM, FakeLLM, LLMResult
-from rag.trace import Trace
-from rag.types import Hit
+from rag.query.prompt import ABSTAIN, CANARY, SYSTEM_PROMPT, build_user_prompt, format_context
+from rag.common.llm import CachedLLM, FakeLLM, LLMResult
+from rag.common.trace import Trace
+from rag.common.types import Hit
 
 
 def hit(page, text="passage text", rank=1):
@@ -60,7 +60,7 @@ def test_judges_return_verdicts_and_handle_garbage():
 
 
 def test_fact_checklist_judge_requires_every_fact_and_names_the_missing_ones():
-    from rag.eval.judge import judge_facts
+    from rag.observe.generation_quality.judge import judge_facts
 
     facts = ["fact one", "fact two"]
     all_yes = FakeLLM(lambda s, u: '{"results": [{"n": 1, "stated": true}, {"n": 2, "stated": true}]}')

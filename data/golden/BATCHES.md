@@ -16,7 +16,7 @@ and its pages were printed pages. Its questions overlap batch 2, which replaces 
 ## Adding a batch
 
 1. Save the raw paste as `data/golden/batchN.jsonl` (ignored by git).
-2. `python -m rag.eval.clean_paste data/golden/batchN.jsonl data/golden/batchN.clean.jsonl`
-3. `python -m rag.eval.verify_golden data/golden/batchN.clean.jsonl data/processed/ddia.pages.jsonl`
+2. `python -m rag.observe.golden_tools.clean_paste data/golden/batchN.jsonl data/golden/batchN.clean.jsonl`
+3. `python -m rag.observe.golden_tools.verify_golden data/golden/batchN.clean.jsonl data/processed/ddia.pages.jsonl`
 4. Fix or drop what the verifier flags, then append to `ddia_questions.jsonl` with new ids and
    `"batch": N`, and add a row to the table above.

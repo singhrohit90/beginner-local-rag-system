@@ -1,7 +1,7 @@
 import pymupdf
 
-from rag.ingest.clean import clean_block, is_noise, normalize_key
-from rag.ingest.extract import (
+from rag.ingestion.clean import clean_block, is_noise, normalize_key
+from rag.ingestion.extract import (
     _line_text,
     extract_pages,
     extract_toc,

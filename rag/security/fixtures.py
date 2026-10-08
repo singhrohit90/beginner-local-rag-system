@@ -21,7 +21,7 @@ Attack types
 from dataclasses import dataclass
 from typing import List
 
-from rag.generation.prompt import CANARY
+from rag.query.prompt import CANARY
 
 
 @dataclass(frozen=True)

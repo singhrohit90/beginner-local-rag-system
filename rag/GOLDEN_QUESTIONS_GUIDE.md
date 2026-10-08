@@ -53,7 +53,7 @@ In this PDF, PDF page = printed page + 22. Labels written from the printed numbe
 - Write skew meeting-room example: labelled 248, but the example runs PDF 271 to 273, while PDF 270
   only names the term.
 
-Check: always run `python -m rag.eval.verify_golden`.
+Check: always run `python -m rag.observe.golden_tools.verify_golden`.
 
 ### Evidence term that proves nothing
 
@@ -107,14 +107,14 @@ In the 20-question list, 19 had no reference answer. Those questions can score r
 
 1. Open the book to a passage that states something specific. Note the printed page.
 2. Add 22 to get the PDF page. Check it with
-   `python -m rag.eval.find_pages data/processed/ddia.pages.jsonl "distinctive term"`, which prints
+   `python -m rag.observe.golden_tools.find_pages data/processed/ddia.pages.jsonl "distinctive term"`, which prints
    both numbers.
 3. Copy the key sentence into `reference_answer`.
 4. Write the question the way a user who has not read the passage would ask it. Do not reuse the
    passage's distinctive wording.
 5. Pick 1 to 3 distinctive strings from the gold page as `evidence_terms`.
 6. Add the row to `data/golden/ddia_questions.jsonl` and run
-   `python -m rag.eval.verify_golden data/golden/ddia_questions.jsonl data/processed/ddia.pages.jsonl`.
+   `python -m rag.observe.golden_tools.verify_golden data/golden/ddia_questions.jsonl data/processed/ddia.pages.jsonl`.
 7. Read the verifier's "elsewhere" list. Those are distractor pages a retriever may return. A few
    distractors make the question harder and more realistic, which is good.
 

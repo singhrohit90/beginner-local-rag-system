@@ -7,7 +7,7 @@ the chat message is short.
 
 Upload both as sources:
 
-1. `data/processed/ddia_for_agent.txt` (the book, made by `python -m rag.ingest.export_text`)
+1. `data/processed/ddia_for_agent.txt` (the book, made by `python -m rag.ingestion.export_text`)
 2. `data/golden/question_writer_rules.md` (the rules, about 4,000 characters)
 
 If the notebook has a place for custom chat instructions, you can paste the rules there instead,
@@ -30,8 +30,8 @@ be one question, not two joined with and".
 ## After each batch
 
 1. Copy the output into a plain-text editor and save it as `data/golden/batchN.jsonl`.
-2. `python -m rag.eval.clean_paste data/golden/batchN.jsonl data/golden/batchN.clean.jsonl`
-3. `python -m rag.eval.verify_golden data/golden/batchN.clean.jsonl data/processed/ddia.pages.jsonl`
+2. `python -m rag.observe.golden_tools.clean_paste data/golden/batchN.jsonl data/golden/batchN.clean.jsonl`
+3. `python -m rag.observe.golden_tools.verify_golden data/golden/batchN.clean.jsonl data/processed/ddia.pages.jsonl`
 4. Log it in `BATCHES.md`.
 
 ## Ideas for later batches

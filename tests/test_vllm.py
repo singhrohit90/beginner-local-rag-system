@@ -4,7 +4,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
-from rag.llm import CachedLLM, OpenAICompatLLM, get_llm
+from rag.common.llm import CachedLLM, OpenAICompatLLM, get_llm
 
 
 class FakeVllm(BaseHTTPRequestHandler):

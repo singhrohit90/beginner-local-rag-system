@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from rag.eval.clean_paste import normalise, parse_objects, repair_text
+from rag.observe.golden_tools.clean_paste import normalise, parse_objects, repair_text
 
 
 def test_repairs_markdown_escapes_and_entities():

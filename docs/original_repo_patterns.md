@@ -18,7 +18,7 @@ query_body = {
 client.search(index=INDEX, body=query_body, search_pipeline="nlp-search-pipeline")
 ```
 
-Why it matters: our own fusion lives in `rag/retrieval/fusion.py`. The database pipeline does the same job server side, so compare the two on the golden set before switching. The search pipeline must be created first (not shown in the fork's search code).
+Why it matters: our own fusion lives in `rag/query/fusion.py`. The database pipeline does the same job server side, so compare the two on the golden set before switching. The search pipeline must be created first (not shown in the fork's search code).
 
 ## 2. Index mapping (from `src/index_config.json`)
 

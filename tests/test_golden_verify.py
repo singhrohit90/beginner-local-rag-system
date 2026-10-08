@@ -1,7 +1,7 @@
 import json
 
-from rag.eval.golden import GoldQuestion, load_golden
-from rag.eval.verify_golden import verify
+from rag.observe.golden import GoldQuestion, load_golden
+from rag.observe.golden_tools.verify_golden import verify
 
 TEXTS = {
     1: "intro text",
@@ -24,8 +24,8 @@ def test_term_matches_across_aligned_whitespace():
 
 
 def test_strictify_demotes_hits_without_the_evidence_text():
-    from rag.eval.metrics import first_relevant_rank, strictify
-    from rag.types import Hit
+    from rag.observe.retrieval_quality.metrics import first_relevant_rank, strictify
+    from rag.common.types import Hit
 
     on_page_without_answer = Hit("a", 1, 1.0, 10, 10, "unrelated words on the right page")
     on_page_with_answer = Hit("b", 2, 0.9, 10, 10, "The answer is the   Write-Ahead Log here")

@@ -4,7 +4,7 @@ import urllib.error
 
 import pytest
 
-from rag.llm import CachedLLM, FakeLLM, OllamaLLM, get_llm
+from rag.common.llm import CachedLLM, FakeLLM, OllamaLLM, get_llm
 
 
 class FakeResponse(io.BytesIO):

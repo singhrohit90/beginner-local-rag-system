@@ -1,13 +1,13 @@
 import pytest
 
-from rag.chunking import RecursiveChunker
-from rag.chunking.document import Document
-from rag.embed import HashingEmbedder
-from rag.generation.prompt import CANARY
-from rag.llm import FakeLLM
-from rag.retrieval.bm25 import BM25Index
-from rag.retrieval.pipeline import RetrievalConfig, RetrievalPipeline
-from rag.retrieval.store import VectorIndex
+from rag.ingestion.chunking import RecursiveChunker
+from rag.ingestion.chunking.document import Document
+from rag.common.embed import HashingEmbedder
+from rag.query.prompt import CANARY
+from rag.common.llm import FakeLLM
+from rag.common.bm25 import BM25Index
+from rag.query.pipeline import RetrievalConfig, RetrievalPipeline
+from rag.common.store import VectorIndex
 from rag.security.defenses import (
     BLOCKED,
     SPOTLIGHT_SYSTEM_PROMPT,
@@ -19,7 +19,7 @@ from rag.security.defenses import (
 from rag.security.fixtures import POISONED_DOCS, PoisonedDoc
 from rag.security.indirect import pipeline_with, poison_chunk, run_attack
 from rag.security.scan import scan_text
-from rag.types import Hit, Page
+from rag.common.types import Hit, Page
 
 
 def test_fixtures_are_well_formed():

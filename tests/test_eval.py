@@ -2,17 +2,17 @@ import json
 
 import pytest
 
-from rag.eval.diagnose import locate_failure, stage_ranks
-from rag.eval.golden import GoldQuestion, load_golden
-from rag.eval.metrics import (
+from rag.observe.retrieval_quality.diagnose import locate_failure, stage_ranks
+from rag.observe.golden import GoldQuestion, load_golden
+from rag.observe.retrieval_quality.metrics import (
     ndcg_at_k,
     recall_at_k,
     reciprocal_rank,
     score_hits,
 )
-from rag.eval.run_eval import run_eval
-from rag.trace import Trace, load_trace
-from rag.types import Hit
+from rag.observe.retrieval_quality.run_eval import run_eval
+from rag.common.trace import Trace, load_trace
+from rag.common.types import Hit
 
 
 def hit(cid, rank, start, end=None):

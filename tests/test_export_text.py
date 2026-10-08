@@ -1,5 +1,5 @@
-from rag.ingest.export_text import render
-from rag.types import Page
+from rag.ingestion.export_text import render
+from rag.common.types import Page
 
 
 def test_render_marks_pages_and_skips_empty_and_index():

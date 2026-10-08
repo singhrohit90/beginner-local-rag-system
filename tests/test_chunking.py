@@ -2,20 +2,20 @@ import re
 
 import pytest
 
-from rag.chunking import (
+from rag.ingestion.chunking import (
     FixedChunker,
     HeadingChunker,
     ParentChildChunker,
     RecursiveChunker,
     SemanticChunker,
 )
-from rag.chunking.document import Document, body_range
-from rag.chunking.heading import sections
-from rag.chunking.stats import chunk_stats, evidence_intact
-from rag.chunking.units import atomic_units, blocks, pack, sentences, words_of
-from rag.embed import HashingEmbedder
-from rag.eval.golden import GoldQuestion
-from rag.types import Page
+from rag.ingestion.chunking.document import Document, body_range
+from rag.ingestion.chunking.heading import sections
+from rag.ingestion.chunking.stats import chunk_stats, evidence_intact
+from rag.ingestion.chunking.units import atomic_units, blocks, pack, sentences, words_of
+from rag.common.embed import HashingEmbedder
+from rag.observe.golden import GoldQuestion
+from rag.common.types import Page
 
 
 def para(topic: str, sentences_count: int) -> str:

@@ -14,8 +14,8 @@ import re
 from dataclasses import dataclass
 from typing import List
 
-from rag.generation.prompt import ABSTAIN, CANARY, SYSTEM_PROMPT
-from rag.types import Hit
+from rag.query.prompt import ABSTAIN, CANARY, SYSTEM_PROMPT
+from rag.common.types import Hit
 
 BLOCKED = "This answer was withheld because it appeared to contain injected instructions."
 
