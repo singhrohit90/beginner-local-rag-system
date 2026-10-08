@@ -21,6 +21,12 @@ def load_env(path: Path = ROOT / ".env") -> None:
         os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
 
 
+def setting(name: str, default: str) -> str:
+    """An environment or .env value with a fallback, for command-line defaults."""
+    load_env()
+    return os.environ.get(name) or default
+
+
 def require(name: str) -> str:
     load_env()
     value = os.environ.get(name)

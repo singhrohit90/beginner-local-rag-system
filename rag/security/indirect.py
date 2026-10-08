@@ -35,6 +35,7 @@ from rag.experiment import CONFIGS, get_index
 from rag.generation.answer import answer_from_context, looks_like_abstention
 from rag.llm import get_llm
 from rag.log import setup_logging
+from rag.secrets import setting
 from rag.retrieval.bm25 import BM25Index
 from rag.retrieval.pipeline import RetrievalPipeline
 from rag.retrieval.store import VectorIndex
@@ -155,7 +156,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawTextHelpFormatter)
     parser.add_argument("--chunker", default="semantic")
     parser.add_argument("--config", default="weighted", choices=sorted(CONFIGS))
-    parser.add_argument("--llm", default="gemini:gemini-3.5-flash-lite")
+    parser.add_argument("--llm", default=setting("RAG_LLM", "vllm:/models/gpt-oss-20b"))
     parser.add_argument("--defenses", default="naive,none,scan,spotlight,output_filter,all")
     parser.add_argument("--copies", type=int, default=1,
                         help="plant each poisoned document this many times (a flooding attack)")

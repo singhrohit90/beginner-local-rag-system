@@ -25,6 +25,7 @@ from rag.experiment import CONFIGS, get_index
 from rag.generation.answer import RagPipeline
 from rag.llm import get_llm
 from rag.log import setup_logging
+from rag.secrets import setting
 from rag.retrieval.bm25 import BM25Index
 from rag.retrieval.pipeline import RetrievalPipeline
 from rag.retrieval.rerank import CrossEncoderReranker
@@ -50,8 +51,9 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawTextHelpFormatter)
     parser.add_argument("--chunker", default="recursive")
     parser.add_argument("--config", default="rrf", choices=sorted(CONFIGS))
-    parser.add_argument("--llm", default="gemini:gemini-3.5-flash-lite")
-    parser.add_argument("--judge", default="gemini:gemini-3.6-flash",
+    parser.add_argument("--llm", default=setting("RAG_LLM", "vllm:/models/gpt-oss-20b"),
+                        help="generator; default is the on-prem vLLM server, override with RAG_LLM")
+    parser.add_argument("--judge", default=setting("RAG_JUDGE", "ollama:qwen2.5:7b"),
                         help="'none' skips correctness and faithfulness judging, so only abstention, "
                              "attack, canary and citation checks run")
     parser.add_argument("--embedder", default="st:sentence-transformers/all-mpnet-base-v2")

@@ -1,5 +1,7 @@
 """The LLM behind one small interface, so the pipeline never knows which provider answers.
 
+    get_llm("vllm:/models/gpt-oss-20b")        the on-prem vLLM server (OpenAI-compatible API),
+                                               over an SSH tunnel, no key
     get_llm("gemini:gemini-3.5-flash-lite")   Google Gemini API, key from GEMINI_API_KEY
     get_llm("ollama:qwen2.5:7b")               a local model served by Ollama, no key
     get_llm("fake")                            canned replies, for tests
@@ -12,6 +14,7 @@ this file is the only place that knows how a provider's request and response loo
 import hashlib
 import json
 import logging
+import os
 import time
 import urllib.error
 import urllib.request
@@ -20,7 +23,7 @@ from pathlib import Path
 from typing import Callable, List, Optional, Protocol
 
 from rag.config import PROCESSED_DIR
-from rag.secrets import require
+from rag.secrets import load_env, require
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +34,9 @@ class LLMResult:
     prompt_tokens: int = 0
     output_tokens: int = 0
     finish_reason: str = ""
+    # A reasoning model's thinking, kept for debugging only. It can quote the system prompt, so it
+    # must never be shown to a user or counted as part of the answer.
+    reasoning: str = ""
 
 
 class LLM(Protocol):
@@ -146,6 +152,134 @@ class OllamaLLM:
         )
 
 
+DEFAULT_REMOTE_URL = "http://127.22.10.1:30007/v1"
+DEFAULT_REMOTE_MODEL = "/models/gpt-oss-20b"
+
+
+class OpenAICompatLLM:
+    """Any server that speaks the OpenAI chat-completions API: vLLM, llama.cpp server, LM Studio,
+    or a hosted OpenAI-style endpoint. Built for the on-prem vLLM server running a reasoning model
+    (gpt-oss-20b) reached through an SSH tunnel.
+
+    Reasoning models spend tokens thinking before they answer, and those tokens count against
+    max_tokens. So the limit sent is the caller's answer budget plus `reasoning_budget`, and an
+    answer cut off by the limit is retried once with a larger budget and then raised as an error,
+    never returned empty as if it were a refusal.
+
+    Settings come from the environment or .env: REMOTE_URL, REMOTE_API_KEY (optional),
+    REMOTE_REASONING_BUDGET, REMOTE_REASONING_EFFORT (low, medium or high; only sent if set).
+    """
+
+    def __init__(
+        self,
+        model: str = "",
+        base_url: Optional[str] = None,
+        api_key: Optional[str] = None,
+        reasoning_budget: Optional[int] = None,
+        reasoning_effort: Optional[str] = None,
+        timeout: float = 300.0,
+        retries: int = 3,
+    ):
+        load_env()
+        self._model = model or os.environ.get("REMOTE_MODEL", DEFAULT_REMOTE_MODEL)
+        self.name = f"vllm:{self._model}"
+        self._base = (base_url or os.environ.get("REMOTE_URL", DEFAULT_REMOTE_URL)).rstrip("/")
+        self._key = api_key if api_key is not None else os.environ.get("REMOTE_API_KEY", "")
+        self._budget = int(reasoning_budget or os.environ.get("REMOTE_REASONING_BUDGET", 3000))
+        self._effort = reasoning_effort or os.environ.get("REMOTE_REASONING_EFFORT") or None
+        self._timeout = timeout
+        self._retries = retries
+
+    def _headers(self) -> dict:
+        headers = {"Content-Type": "application/json"}
+        if self._key:
+            headers["Authorization"] = f"Bearer {self._key}"
+        return headers
+
+    def _unreachable(self, url: str, reason: object) -> RuntimeError:
+        return RuntimeError(
+            f"cannot reach the model server at {url} ({reason}). This is usually the SSH tunnel "
+            f"(PuTTY) not being connected. The tunnel must listen on the host in REMOTE_URL "
+            f"({self._base}). Quick test: curl -s {self._base}/models"
+        )
+
+    def list_models(self) -> List[str]:
+        url = f"{self._base}/models"
+        request = urllib.request.Request(url, headers=self._headers())
+        try:
+            with urllib.request.urlopen(request, timeout=10) as response:
+                data = json.loads(response.read())
+        except urllib.error.URLError as err:
+            raise self._unreachable(url, err.reason if hasattr(err, "reason") else err) from err
+        return [m.get("id", "") for m in data.get("data", [])]
+
+    def _post(self, payload: dict) -> dict:
+        url = f"{self._base}/chat/completions"
+        request = urllib.request.Request(url, json.dumps(payload).encode(), self._headers())
+        delay = 2.0
+        for attempt in range(self._retries + 1):
+            try:
+                with urllib.request.urlopen(request, timeout=self._timeout) as response:
+                    return json.loads(response.read())
+            except urllib.error.HTTPError as err:
+                retryable = err.code in (429, 500, 502, 503, 504)
+                if not retryable or attempt == self._retries:
+                    body = err.read().decode("utf-8", "replace")[:300]
+                    raise RuntimeError(f"model server returned HTTP {err.code}: {body}") from err
+            except urllib.error.URLError as err:
+                reason = getattr(err, "reason", err)
+                if isinstance(reason, ConnectionRefusedError) or "refused" in str(reason).lower():
+                    raise self._unreachable(url, reason) from err  # a dead tunnel will not recover
+                if attempt == self._retries:
+                    raise self._unreachable(url, reason) from err
+            except TimeoutError:
+                if attempt == self._retries:
+                    raise RuntimeError(f"model server did not answer within {self._timeout:.0f}s")
+            logger.warning("model server error, retrying in %.0fs", delay)
+            time.sleep(delay)
+            delay = min(delay * 2, 30)
+        raise RuntimeError("unreachable")
+
+    def generate(
+        self, system: str, user: str, max_output_tokens: int = 1024, json_mode: bool = False
+    ) -> LLMResult:
+        # json_mode is accepted for interface compatibility. Guided JSON can conflict with a
+        # reasoning model's output format, so the judges parse JSON defensively instead.
+        for budget in (self._budget, self._budget * 2):
+            payload = {
+                "model": self._model,
+                "messages": [
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                ],
+                "temperature": 0.0,
+                "max_tokens": max_output_tokens + budget,
+            }
+            if self._effort:
+                payload["reasoning_effort"] = self._effort
+            body = self._post(payload)
+            if not body.get("choices"):
+                raise RuntimeError(f"unexpected reply from the model server: {str(body)[:300]}")
+            choice = body["choices"][0]
+            message = choice.get("message", {})
+            text = (message.get("content") or "").strip()
+            finish = str(choice.get("finish_reason", ""))
+            if finish == "length" and not text:
+                continue  # the thinking used up the whole budget, so retry with more room
+            usage = body.get("usage") or {}
+            return LLMResult(
+                text=text,
+                prompt_tokens=int(usage.get("prompt_tokens", 0) or 0),
+                output_tokens=int(usage.get("completion_tokens", 0) or 0),  # includes reasoning
+                finish_reason=finish,
+                reasoning=(message.get("reasoning") or message.get("reasoning_content") or "").strip(),
+            )
+        raise RuntimeError(
+            "the answer was cut off by max_tokens, even after doubling the reasoning budget. "
+            "Raise REMOTE_REASONING_BUDGET or lower REMOTE_REASONING_EFFORT."
+        )
+
+
 class FakeLLM:
     """Returns replies from a function, so tests can script the model."""
 
@@ -195,6 +329,10 @@ def get_llm(spec: str, cache_dir: Optional[Path] = PROCESSED_DIR / "llm_cache") 
         llm: LLM = GeminiLLM(spec.split(":", 1)[1])
     elif spec.startswith("ollama:"):
         llm = OllamaLLM(spec.split(":", 1)[1])
+    elif spec == "vllm" or spec.startswith("vllm:"):
+        llm = OpenAICompatLLM(spec.split(":", 1)[1] if ":" in spec else "")
     else:
-        raise ValueError(f"unknown llm {spec!r}; use 'gemini:<model>', 'ollama:<model>' or 'fake'")
+        raise ValueError(
+            f"unknown llm {spec!r}; use 'vllm:<model>', 'gemini:<model>', 'ollama:<model>' or 'fake'"
+        )
     return CachedLLM(llm, cache_dir) if cache_dir else llm
