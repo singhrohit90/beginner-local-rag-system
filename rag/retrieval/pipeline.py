@@ -36,6 +36,8 @@ class RetrievalConfig:
     top_k: int = 5  # passages in the final context
     max_words: int = 1500
     use_parents: bool = True
+    scan: bool = True  # context selection skips passages flagged by rag.security.scan
+    max_per_source: int = 2  # cap on passages per source document; 0 = off
 
 
 class RetrievalPipeline:
@@ -108,7 +110,8 @@ class RetrievalPipeline:
             self._hits(merged, keep_text=True),
             self.by_id,
             self.chunkset.parents,
-            ContextConfig(config.top_k, config.max_words, use_parents=config.use_parents),
+            ContextConfig(config.top_k, config.max_words, use_parents=config.use_parents,
+                          scan=config.scan, max_per_source=config.max_per_source),
         )
         trace.record("context", "transform", context)
         return trace

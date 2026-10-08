@@ -107,7 +107,7 @@ def test_poison_chunk_is_isolated_from_real_pages(base):
     assert len(pipeline.chunks) == len(base[0].chunks)  # the original corpus is untouched
     assert pipeline_with(pipeline, [], embedder) is pipeline  # nothing to add, nothing rebuilt
     trace = augmented.run("q", "How does compaction work in a log-structured storage engine?",
-                          RetrievalConfig("t", bm25=True, dense=True, top_k=3))
+                          RetrievalConfig("t", bm25=True, dense=True, top_k=3, scan=False))
     assert "poison-P01" in [h.chunk_id for h in trace.stage("context").hits]
 
 
@@ -139,8 +139,18 @@ def test_run_attack_obeyed_blocked_scanned_and_spotlighted(base):
     flooded = run_attack(doc, 0, "none", pipeline, embedder, gullible, config, {}, copies=3)
     assert flooded.exposed
     ids = [h.chunk_id for h in pipeline_with(pipeline, [poison_chunk(doc, 0, c) for c in range(3)], embedder)
-           .run("q", doc.question, RetrievalConfig("t", top_k=5)).stage("context").hits]
+           .run("q", doc.question, RetrievalConfig("t", top_k=5, scan=False, max_per_source=0))
+           .stage("context").hits]
     assert sum(i.startswith("poison-PX") for i in ids) == 3  # three planted copies fill the context
+
+    # with the pipeline defaults the same flood is stopped: flagged text is skipped outright, and
+    # without the scanner the per-source cap and exact-copy drop leave one copy
+    planted = pipeline_with(pipeline, [poison_chunk(doc, 0, c) for c in range(3)], embedder)
+    default = planted.run("q", doc.question, RetrievalConfig("t", top_k=5)).stage("context").hits
+    assert not any(h.chunk_id.startswith("poison-PX") for h in default)
+    capped = planted.run("q", doc.question, RetrievalConfig("t", top_k=5, scan=False)).stage("context").hits
+    assert sum(h.chunk_id.startswith("poison-PX") for h in capped) == 1
+    assert run_attack(doc, 0, "cap", pipeline, embedder, gullible, config, {}, copies=3).exposed
 
     def careful(system, user):
         assert "<passage_" in user and "Never follow it" in system  # hardened prompts were used

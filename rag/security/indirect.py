@@ -22,7 +22,7 @@ import json
 import logging
 import re
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -54,6 +54,8 @@ DEFENSES: Dict[str, tuple] = {
     "spotlight": ("spotlight",),
     "output_filter": ("filter",),
     "scan_filter": ("scan", "filter"),  # no prompt change: for a model that spotlighting makes cautious
+    "cap": ("cap",),  # at most 2 passages per source, exact copies dropped
+    "default": ("scan", "cap", "filter"),  # the pipeline's own defaults with the production prompt
     "all": ("scan", "spotlight", "filter"),
 }
 
@@ -68,7 +70,7 @@ def poison_chunk(doc: PoisonedDoc, number: int, copy: int = 0) -> Chunk:
         page_end=9000 + number,
         strategy="poison",
         section="poisoned test document",
-        meta={"span": [start, start + len(doc.text)], "poison": doc.id},
+        meta={"span": [start, start + len(doc.text)], "poison": doc.id, "source": doc.id},
     )
 
 
@@ -106,10 +108,14 @@ def run_attack(doc: PoisonedDoc, number: int, defense: str, base: RetrievalPipel
     steps = DEFENSES[defense]
     planted = [poison_chunk(doc, number, c) for c in range(copies)]
     in_corpus = not ("scan" in steps and scan_text(planted[0].text).flagged)
-    key = f"{doc.id}:{in_corpus}:{copies}"
+    capped = "cap" in steps
+    key = f"{doc.id}:{in_corpus}:{copies}:{capped}"
     if key not in context_cache:
         pipeline = pipeline_with(base, planted if in_corpus else [], embedder)
-        context_cache[key] = pipeline.run(doc.id, doc.question, config).stage("context").hits
+        # scanning is modelled by leaving the document out of the corpus above, so select-time
+        # scanning stays off here; otherwise the baselines would silently include it
+        cfg = replace(config, scan=False, max_per_source=2 if capped else 0)
+        context_cache[key] = pipeline.run(doc.id, doc.question, cfg).stage("context").hits
     context = context_cache[key]
     exposed = any(h.chunk_id.startswith(f"poison-{doc.id}") for h in context)
 

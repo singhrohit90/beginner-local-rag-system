@@ -61,6 +61,8 @@ def main() -> None:
     parser.add_argument("--golden", type=Path, default=GOLDEN_DIR / "ddia_questions.jsonl")
     parser.add_argument("--style", default="standard", choices=["standard", "spotlight", "naive"],
                         help="prompt style; spotlight is the hardened prompt from rag.security.defenses")
+    parser.add_argument("--no-output-filter", action="store_true",
+                        help="do not withhold answers that look hijacked (for comparisons only)")
     parser.add_argument("--workers", type=int, default=4)
     parser.add_argument("--limit", type=int, default=0, help="only the first N questions")
     parser.add_argument("--name", default=None)
@@ -81,7 +83,7 @@ def main() -> None:
     retrieval = RetrievalPipeline(chunkset, index, BM25Index(chunkset.chunks), embedder, reranker)
     generator = get_llm(args.llm)
     judge = None if args.judge == "none" else get_llm(args.judge)  # none: skip correctness judging
-    pipeline = RagPipeline(retrieval, generator, style=args.style)
+    pipeline = RagPipeline(retrieval, generator, style=args.style, output_filter=not args.no_output_filter)
 
     # Retrieval touches the GPU, so run it in order; the slow, network-bound LLM calls run in parallel.
     contexts = {q.id: retrieval.run(q.id, q.question, config) for q in questions}
