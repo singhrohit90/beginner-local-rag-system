@@ -2,20 +2,29 @@
 
     uvicorn rag.api.main:app --port 8000        then open http://127.0.0.1:8000
 
-Endpoints
-    POST   /documents              upload a PDF, ingestion runs in the background
-    GET    /documents              list documents with their status
-    GET    /documents/{id}         one document's status (queued, processing, ready, failed)
-    POST   /documents/{id}/ask     {"question": "..."} -> answer, passages, trace stages
-    DELETE /documents/{id}
-    GET    /health
+Endpoints (the API is /v1; the page at / is only one client of it)
+    POST   /v1/documents              upload a PDF, ingestion runs in the background
+    GET    /v1/documents              list documents with their status
+    GET    /v1/documents/{id}         one document's status (queued, processing, ready, failed)
+    POST   /v1/documents/{id}/ask     {"question": "..."} -> answer, passages, trace stages
+    DELETE /v1/documents/{id}
+    GET    /v1/health
+
+Request checks (see docs/auth_plan.md): the Host header must be on an allowlist, which stops DNS
+rebinding, and a state-changing request that carries an Origin header must come from the server's
+own origin or an allowed one, which stops other web pages from driving the API through a browser.
+A request with no Origin header is a program (a scraper, an MCP server), not a browser, and passes.
+There is no login yet.
 """
 
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Sequence
 
-from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, UploadFile
-from fastapi.responses import FileResponse
+from urllib.parse import urlparse
+
+from fastapi import APIRouter, BackgroundTasks, FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi.responses import FileResponse, JSONResponse
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 from pydantic import BaseModel, Field
 
 from rag.api.service import BadUpload, DocumentService, NotFound
@@ -25,6 +34,8 @@ from rag.query.configs import CONFIGS
 STATIC = Path(__file__).parent / "static"
 # The service has no reranker loaded, so only the configs that do not need one are offered.
 USABLE_CONFIGS = sorted(name for name, c in CONFIGS.items() if not c.rerank)
+DEFAULT_HOSTS = ("127.0.0.1", "localhost")
+STATE_CHANGING = {"POST", "PUT", "PATCH", "DELETE"}
 
 
 class AskRequest(BaseModel):
@@ -50,9 +61,27 @@ def build_default_service() -> DocumentService:
     )
 
 
-def create_app(service: Optional[DocumentService] = None,
-               service_factory: Callable[[], DocumentService] = build_default_service) -> FastAPI:
+def create_app(
+    service: Optional[DocumentService] = None,
+    service_factory: Callable[[], DocumentService] = build_default_service,
+    allowed_hosts: Sequence[str] = DEFAULT_HOSTS,
+    allowed_origins: Sequence[str] = (),
+) -> FastAPI:
+    """allowed_hosts: host names the server answers to (no port). allowed_origins: extra browser
+    origins, as "scheme://host:port", besides the server's own."""
     app = FastAPI(title="RAG document chat")
+    app.add_middleware(TrustedHostMiddleware, allowed_hosts=list(allowed_hosts))
+
+    @app.middleware("http")
+    async def reject_foreign_origins(request: Request, call_next):
+        origin = request.headers.get("origin")
+        if origin is not None and request.method in STATE_CHANGING:
+            same_origin = urlparse(origin).netloc == request.headers.get("host")
+            if not (same_origin or origin in allowed_origins):
+                return JSONResponse({"detail": "origin not allowed"}, status_code=403)
+        return await call_next(request)
+
+    v1 = APIRouter(prefix="/v1")
     state: Dict[str, Optional[DocumentService]] = {"service": service}
 
     def svc() -> DocumentService:
@@ -64,11 +93,11 @@ def create_app(service: Optional[DocumentService] = None,
     def page() -> FileResponse:
         return FileResponse(STATIC / "index.html")
 
-    @app.get("/health")
+    @v1.get("/health")
     def health() -> Dict[str, Any]:
         return {"ok": True, "chunkers": list(STRATEGIES), "configs": USABLE_CONFIGS}
 
-    @app.post("/documents", status_code=202)
+    @v1.post("/documents", status_code=202)
     async def upload(background: BackgroundTasks, file: UploadFile = File(...),
                      chunker: str = Form("recursive")) -> Dict[str, Any]:
         if chunker not in STRATEGIES:
@@ -82,25 +111,25 @@ def create_app(service: Optional[DocumentService] = None,
         background.add_task(service.run_ingestion, status["id"])
         return status
 
-    @app.get("/documents")
+    @v1.get("/documents")
     def list_documents() -> List[Dict[str, Any]]:
         return svc().list()
 
-    @app.get("/documents/{doc_id}")
+    @v1.get("/documents/{doc_id}")
     def get_document(doc_id: str) -> Dict[str, Any]:
         try:
             return svc().get(doc_id)
         except NotFound:
             raise HTTPException(404, "no such document")
 
-    @app.delete("/documents/{doc_id}", status_code=204)
+    @v1.delete("/documents/{doc_id}", status_code=204)
     def delete_document(doc_id: str) -> None:
         try:
             svc().delete(doc_id)
         except NotFound:
             raise HTTPException(404, "no such document")
 
-    @app.post("/documents/{doc_id}/ask")
+    @v1.post("/documents/{doc_id}/ask")
     def ask(doc_id: str, request: AskRequest) -> Dict[str, Any]:
         if request.config not in USABLE_CONFIGS:
             raise HTTPException(422, f"config must be one of {USABLE_CONFIGS}")
@@ -115,7 +144,16 @@ def create_app(service: Optional[DocumentService] = None,
         except Exception as err:  # most often the model server being unreachable
             raise HTTPException(502, f"{type(err).__name__}: {err}")
 
+    app.include_router(v1)
     return app
 
 
-app = create_app()
+def _csv(name: str, default: str = "") -> List[str]:
+    from rag.common.secrets import setting
+
+    return [part.strip() for part in setting(name, default).split(",") if part.strip()]
+
+
+# RAG_ALLOWED_HOSTS: host names this server answers to; RAG_ALLOWED_ORIGINS: extra browser origins.
+app = create_app(allowed_hosts=_csv("RAG_ALLOWED_HOSTS", ",".join(DEFAULT_HOSTS)),
+                 allowed_origins=_csv("RAG_ALLOWED_ORIGINS"))

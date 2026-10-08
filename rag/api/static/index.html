@@ -110,7 +110,7 @@ async function api(path, options) {
 function showError(message) { $("error").textContent = message || ""; }
 
 async function refresh() {
-  docs = await api("/documents");
+  docs = await api("/v1/documents");
   const box = $("docs"); box.replaceChildren();
   for (const d of docs) {
     const node = el("div", { class: "doc" + (selected === d.id ? " sel" : "") },
@@ -120,7 +120,7 @@ async function refresh() {
       el("small", {}, d.error ? " · " + d.error : ""));
     node.onclick = () => select(d.id);
     const del = el("button", { textContent: "Delete", title: "Delete this document" });
-    del.onclick = async (e) => { e.stopPropagation(); await api("/documents/" + d.id, { method: "DELETE" }); if (selected === d.id) selected = null; refresh(); updateChat(); };
+    del.onclick = async (e) => { e.stopPropagation(); await api("/v1/documents/" + d.id, { method: "DELETE" }); if (selected === d.id) selected = null; refresh(); updateChat(); };
     node.append(el("div", {}, del));
     box.append(node);
   }
@@ -142,7 +142,7 @@ $("upload").onsubmit = async (e) => {
   e.preventDefault(); showError("");
   const form = new FormData();
   form.append("file", $("file").files[0]); form.append("chunker", $("chunker").value);
-  try { const d = await api("/documents", { method: "POST", body: form }); selected = d.id; $("file").value = ""; }
+  try { const d = await api("/v1/documents", { method: "POST", body: form }); selected = d.id; $("file").value = ""; }
   catch (err) { showError(err.message); }
   refresh().then(updateChat);
 };
@@ -153,7 +153,7 @@ $("ask").onsubmit = async (e) => {
   $("question").value = ""; $("send").disabled = true;
   $("log").append(el("div", { class: "msg q" }, question));
   try {
-    const r = await api(`/documents/${selected}/ask`, { method: "POST", headers: { "Content-Type": "application/json" },
+    const r = await api(`/v1/documents/${selected}/ask`, { method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ question, config: $("config").value }) });
     answers[r.query_id] = r;
     const msg = el("div", { class: "msg a" }, r.answer || "");

@@ -228,5 +228,5 @@ documents never mix; one document is searched at a time. Chat traces are saved t
 
 Port 8000 is often taken on this machine by another service, so pick any free port. Models come
 from `.env` (`RAG_LLM`, `RAG_EMBEDDER`); if the model server is down, asking returns a 502 with
-the reason. The API is `POST /documents`, `GET /documents`, `GET /documents/{id}`,
-`POST /documents/{id}/ask` and `DELETE /documents/{id}`; its docs are at `/docs`.
+the reason. The API is `POST /v1/documents`, `GET /v1/documents`, `GET /v1/documents/{id}`,
+`POST /v1/documents/{id}/ask` and `DELETE /v1/documents/{id}`; its docs are at `/docs`. See `docs/auth_plan.md` and `docs/mcp_risks.md` before exposing it.
