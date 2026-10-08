@@ -230,3 +230,29 @@ def test_rag_pipeline_withholds_hijacked_answers_by_default():
     assert trace.answer == BLOCKED and "external-image" in trace.config["usage"]["blocked"]
     off = RagPipeline(retrieval=None, llm=llm, output_filter=False).answer(trace_with("", [10]))
     assert off.answer.startswith("Sure!") and off.config["usage"]["blocked"] == []
+
+
+def test_uploads_get_a_prompt_that_does_not_name_the_book():
+    from rag.query.generate import answer_from_context
+    from rag.query.prompt import ABSTAIN_DOCUMENT, DOCUMENT_SYSTEM_PROMPT
+
+    assert "Designing Data-Intensive" not in DOCUMENT_SYSTEM_PROMPT and ABSTAIN_DOCUMENT in DOCUMENT_SYSTEM_PROMPT
+    assert "quoted document text" in DOCUMENT_SYSTEM_PROMPT and CANARY in DOCUMENT_SYSTEM_PROMPT
+    # the book's prompt is what the golden-set results were measured with: it must not drift
+    assert "the book 'Designing Data-Intensive Applications'" in SYSTEM_PROMPT and "quoted book text" in SYSTEM_PROMPT
+    assert ABSTAIN in SYSTEM_PROMPT
+
+    seen = []
+    llm = FakeLLM(lambda system, user: seen.append(system) or ABSTAIN_DOCUMENT)
+    answer, _ = answer_from_context(llm, "Q?", [hit(1)], subject="document")
+    assert seen[0] == DOCUMENT_SYSTEM_PROMPT and answer.abstained
+    answer_from_context(llm, "Q?", [hit(1)], style="spotlight", subject="document")
+    assert seen[1].startswith(DOCUMENT_SYSTEM_PROMPT) and "Handling untrusted passages" in seen[1]
+    answer_from_context(llm, "Q?", [hit(1)])
+    assert seen[2] == SYSTEM_PROMPT
+
+
+def test_abstention_is_recognised_in_document_wording():
+    assert looks_like_abstention("I cannot answer this from the provided document.")
+    assert looks_like_abstention("The document does not mention that.")
+    assert not looks_like_abstention("Replication copies data to followers [S1].")

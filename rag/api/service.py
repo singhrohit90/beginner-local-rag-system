@@ -238,7 +238,7 @@ class DocumentService:
         retrieval = self._retrieval(doc_id)
         started = time.perf_counter()
         query_id = f"{doc_id}-{int(time.time() * 1000)}"
-        trace = RagPipeline(retrieval, self.llm, style=style).run(query_id, question, CONFIGS[config])
+        trace = RagPipeline(retrieval, self.llm, style=style, subject="document").run(query_id, question, CONFIGS[config])
         if self.traces_dir:
             trace.save(self.traces_dir)
         usage = trace.config.get("usage", {})

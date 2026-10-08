@@ -23,6 +23,8 @@ def body_range(toc: List[Dict[str, Any]]) -> tuple:
     """
     first = next((e["page"] for e in toc if re.match(r"Part I\.", e["title"])), None)
     last = next((e["page"] - 1 for e in toc if e["title"] in ("Glossary", "Index")), None)
+    if first is None or last is None or last < first:
+        return None, None  # not a book laid out like this one: keep every page
     return first, last
 
 
@@ -56,7 +58,7 @@ class Document:
             position += len(page.text) + 2  # the two newlines that join pages
         return cls(
             pages=body,
-            toc=[e for e in toc if first is None or first <= e["page"] <= (last or 10**9)],
+            toc=[e for e in toc if first is None or first <= e["page"] <= (last if last is not None else 10**9)],
             text="\n\n".join(p.text for p in body),
             page_nos=[p.page_no for p in body],
             starts=starts,

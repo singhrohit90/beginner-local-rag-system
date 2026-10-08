@@ -36,4 +36,4 @@ def is_running_footer(text: str) -> bool:
 
 def is_noise(text: str) -> bool:
     """True for blocks with no content: empty, or only digits and punctuation (page numbers)."""
-    return not re.search(r"[A-Za-z]", text)
+    return not any(ch.isalpha() for ch in text)  # any script counts, not only a-z

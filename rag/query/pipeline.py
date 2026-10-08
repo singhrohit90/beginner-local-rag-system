@@ -139,11 +139,12 @@ class RagPipeline:
     traced to the stage that caused it."""
 
     def __init__(self, retrieval: RetrievalPipeline, llm: LLM, style: str = "standard",
-                 output_filter: bool = True):
+                 output_filter: bool = True, subject: str = "book"):
         self.retrieval = retrieval
         self.llm = llm
         self.style = style  # prompt style, see rag.query.generate.answer_from_context
         self.output_filter = output_filter  # withhold answers that show signs of a hijack
+        self.subject = subject  # "book" (the DDIA prompt) or "document" (uploads)
 
     def run(self, query_id: str, question: str, config: RetrievalConfig) -> Trace:
         return self.answer(self.retrieval.run(query_id, question, config))
@@ -152,7 +153,8 @@ class RagPipeline:
         """Generate from the context already recorded in a retrieval trace."""
         question = trace.question
         context = trace.stage("context").hits
-        answer, prompt = answer_from_context(self.llm, question, context, style=self.style)
+        answer, prompt = answer_from_context(self.llm, question, context, style=self.style,
+                                           subject=self.subject)
         trace.config["prompt_style"] = self.style
         trace.prompt = prompt
         trace.answer = answer.text

@@ -190,3 +190,23 @@ def test_make_chunker_picks_a_strategy_by_name():
         make_chunker("semantic")
     with pytest.raises(ValueError, match="unknown chunking strategy"):
         make_chunker("nope")
+
+
+def test_body_range_only_trims_books_laid_out_like_the_reference_book():
+    from rag.ingestion.chunking.document import body_range
+
+    book = [{"title": "Part I. Foundations", "page": 20}, {"title": "Index", "page": 100}]
+    assert body_range(book) == (20, 99)
+    assert body_range([{"title": "Index", "page": 1}]) == (None, None)  # a contract with a bookmark called Index
+    assert body_range([{"title": "Glossary", "page": 50}]) == (None, None)  # no Part I: keep every page
+    assert body_range([{"title": "Index", "page": 5}, {"title": "Part I. Start", "page": 20}]) == (None, None)
+    assert body_range([]) == (None, None)
+
+
+def test_text_in_any_script_is_not_treated_as_noise():
+    from rag.ingestion.clean import is_noise
+
+    for text in ["Репликация данных", "數據複製", "αβγ replication", "données répliquées", "النسخ المتماثل"]:
+        assert not is_noise(text), text
+    for text in ["", "42", "---", "12 | 34", "  "]:
+        assert is_noise(text), text
