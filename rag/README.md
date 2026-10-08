@@ -1,19 +1,47 @@
 # Modular RAG learning project
 
-Each stage is a separate module so you can see exactly when it is called. Built so every change
-can be measured and every wrong answer can be traced to a stage.
+Two pipelines, each a short orchestrator that runs single-purpose step modules in order. An
+observe layer scores them from the traces they write. Built so every change can be measured and
+every wrong answer can be traced to a stage.
 
-## Status
+    INGESTION  (rag/ingestion/pipeline.py)         QUERY  (rag/query/pipeline.py)
 
-| Step | Module | State |
-|------|--------|-------|
-| 1 | `rag/ingestion` PDF extraction and cleaning | done |
-| 2 | `rag/observe/golden.py` golden question format | done, questions still to be written |
-| 3 | `rag/common/trace.py`, `rag/eval/{metrics,diagnose,run_eval}.py` | done |
-| 4 | `rag/ingestion/chunking` fixed, recursive, semantic, heading-aware, parent-child | done; semantic still to be built with a real embedder |
-| 5 | `rag/retrieval` dense, BM25, fusion, rerank, context selection; `rag/experiments/retrieval.py` | done, no LLM yet |
-| 6 | `rag/generation`, `rag/common/llm.py`, `rag/eval/{judge,answers}.py`, `rag/experiments/answer.py` | done; judge is a local model |
-| 7 | security tests (injection, poisoning, access control) | |
+    PDF                                            question
+     |  extract.py     clean pages + bookmarks      |  retrieve.py        dense + keyword search
+     |  chunk.py       pick a chunking strategy     |  fusion.py          merge the two lists
+     |  index.py       embed + cache vectors        |  rerank.py          cross-encoder (optional)
+     v                                              |  select_context.py  dedupe, cap, word budget
+    vector index  ----- the only link ------>      |  generate.py        prompt + call the model
+                                                    |  guard.py           scanner + output filter
+                                                    v
+                                                  answer + Trace  --->  OBSERVE (rag/observe)
+                                                                        retrieval_quality, generation_quality
+
+## Layout
+
+| Folder | Holds |
+|--------|-------|
+| `rag/common/` | what both pipelines share: `types`, `config`, `trace`, `llm`, `embed`, `store` (vector index), `bm25` |
+| `rag/ingestion/` | the ingestion pipeline and its steps; `chunking/` has the five strategies |
+| `rag/query/` | the query pipeline and its steps, `configs.py` for the named retrieval configs |
+| `rag/observe/` | `retrieval_quality/` (metrics, failure diagnosis), `generation_quality/` (judge, answer scoring), `golden.py`, `golden_tools/` (helpers for writing the question set) |
+| `rag/security/` | poisoned documents and the injection test harness |
+| `rag/experiments/` | scripts that run a whole comparison and print a table |
+
+## Read in this order
+
+1. `common/types.py`, `common/trace.py` (under 90 lines each): the two objects every step passes around.
+2. `ingestion/pipeline.py`, then `ingestion/extract.py`: how a PDF becomes clean pages.
+3. `ingestion/chunking/recursive.py` and the `units.py` helpers it calls: the simplest real chunker. Skip the other four at first.
+4. `query/pipeline.py`: the whole query path in one screen.
+5. `query/retrieve.py`, `query/fusion.py`, `query/select_context.py`: the steps it calls.
+6. `query/prompt.py`, `query/generate.py`, `query/guard.py`: the generation half.
+7. `observe/retrieval_quality/metrics.py`, `observe/generation_quality/answers.py`: how it is scored.
+
+Skip until needed: `common/llm.py` (model providers),
+`observe/generation_quality/calibrate_judge.py`, `observe/golden_tools/`, and `security/`.
+
+The steps below are the order the project was built in, each with the command to run it.
 
 ## Setup
 
@@ -21,6 +49,9 @@ can be measured and every wrong answer can be traced to a stage.
     python -m pytest tests -q
 
 ## Step 1: extract the book
+
+The whole ingestion in one command: `python -m rag.ingestion.pipeline data/raw/ddia.pdf --chunker semantic`.
+The steps below run each part on its own.
 
 Put the PDF in `data/raw/` (gitignored, do not commit it), then:
 
@@ -79,10 +110,10 @@ Semantic chunking needs the extras: `pip install sentence-transformers` (pulls i
     python -m rag.experiments.retrieval --configs dense_rerank,rrf_rerank
     python -m rag.experiments.retrieval --chunkers recursive --variant heading --rebuild
 
-Each stage is its own module in `rag/query/`: `store.py` (numpy vectors, exact cosine search),
-`bm25.py`, `fusion.py` (RRF and weighted min-max), `rerank.py` (cross-encoder), `select.py` (dedupe,
-parents, word budget) and `pipeline.py`, which calls them in order and records each stage in the
-trace. Embeddings are cached in `data/processed/index/`.
+Each stage is its own module: `common/store.py` (numpy vectors, exact cosine search),
+`common/bm25.py`, `query/fusion.py` (RRF and weighted min-max), `query/rerank.py` (cross-encoder),
+`query/select_context.py` (dedupe, parents, word budget) and `query/pipeline.py`, which calls them in
+order and records each stage in the trace. Embeddings are cached in `data/processed/index/`.
 
 Reading the table: `cand@30` is recall among the 30 candidates before reranking and context
 selection, and `hit@5` is whether any gold page is in the final 5 passages. A big gap between them
