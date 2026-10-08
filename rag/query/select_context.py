@@ -31,6 +31,8 @@ class ContextConfig:
 
 
 def _overlap(a: Chunk, b: Chunk) -> float:
+    if a.meta.get("source") != b.meta.get("source"):
+        return 0.0  # character offsets only mean something inside one document
     a_start, a_end = a.meta["span"]
     b_start, b_end = b.meta["span"]
     shared = max(0, min(a_end, b_end) - max(a_start, b_start))

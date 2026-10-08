@@ -168,3 +168,123 @@ def test_a_single_document_repeating_one_passage_sends_it_once(tmp_path):
     body = client.post(f"/v1/documents/{doc_id}/ask", json={"question": "replication lag boilerplate", "config": "bm25"}).json()
     texts = [" ".join(p["text"].split()) for p in body["passages"]]
     assert len(texts) == len(set(texts)) and len(texts) >= 1
+
+
+def blank_pdf() -> bytes:
+    doc = pymupdf.open()
+    doc.new_page()
+    data = doc.tobytes()
+    doc.close()
+    return data
+
+
+def test_a_pdf_with_no_text_fails_with_a_clear_reason(tmp_path):
+    client, _ = make_client(tmp_path)
+    doc_id = upload(client, blank_pdf()).json()["id"]
+    status = client.get(f"/v1/documents/{doc_id}").json()
+    assert status["state"] == "failed" and "no text" in status["error"]
+    assert client.post(f"/v1/documents/{doc_id}/ask", json={"question": "anything"}).status_code == 409
+
+
+def test_interrupted_documents_are_marked_failed_after_a_restart(tmp_path):
+    client, service = make_client(tmp_path)
+    doc_id = upload(client, make_pdf(REPLICATION)).json()["id"]
+    service._write_status(doc_id, state="processing")  # as if the server died mid-ingestion
+    restarted = DocumentService(root=tmp_path / "uploads", embedder=HashingEmbedder(), embedder_spec="hash",
+                                llm=FakeLLM(lambda s, u: "x"))
+    status = restarted.get(doc_id)
+    assert status["state"] == "failed" and "restart" in status["error"]
+
+
+def test_deleting_a_document_while_it_is_being_indexed_leaves_nothing_behind(tmp_path):
+    import threading
+
+    started, release = threading.Event(), threading.Event()
+
+    class SlowEmbedder(HashingEmbedder):
+        def embed_documents(self, texts):
+            started.set()
+            release.wait(5)
+            return super().embed_documents(texts)
+
+    service = DocumentService(root=tmp_path / "uploads", embedder=SlowEmbedder(), embedder_spec="hash",
+                              llm=FakeLLM(lambda s, u: "x"))
+    doc_id = service.create("book.pdf", make_pdf(REPLICATION))["id"]
+    failures = []
+
+    def background():
+        try:
+            service.run_ingestion(doc_id)
+        except Exception as err:  # pragma: no cover - the point of the test is that this stays empty
+            failures.append(err)
+
+    worker = threading.Thread(target=background)
+    worker.start()
+    assert started.wait(5)
+    service.delete(doc_id)  # lands while the vectors are being computed
+    release.set()
+    worker.join(10)
+    assert failures == [] and not worker.is_alive()
+    assert service.list() == [] and not (tmp_path / "uploads" / doc_id).exists()
+    assert not service.store.has_document(doc_id)
+
+
+def test_status_can_be_read_while_it_is_being_rewritten(tmp_path):
+    import threading
+
+    client, service = make_client(tmp_path)
+    doc_id = upload(client, make_pdf(REPLICATION)).json()["id"]
+    errors = []
+
+    def writer():
+        try:
+            for i in range(150):
+                service._write_status(doc_id, chunks=i)
+        except Exception as err:  # pragma: no cover
+            errors.append(err)
+
+    def reader():
+        try:
+            for _ in range(150):
+                service.get(doc_id)
+                service.list()
+        except Exception as err:  # pragma: no cover
+            errors.append(err)
+
+    threads = [threading.Thread(target=writer), threading.Thread(target=reader), threading.Thread(target=reader)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert errors == []
+
+
+def test_the_service_is_built_once_even_when_requests_arrive_together(tmp_path):
+    import threading
+    import time as _time
+
+    built = []
+
+    def factory():
+        built.append(1)
+        _time.sleep(0.2)  # loading models takes a while
+        return DocumentService(root=tmp_path / "uploads", embedder=HashingEmbedder(), embedder_spec="hash",
+                               llm=FakeLLM(lambda s, u: "x"))
+
+    client = TestClient(create_app(service_factory=factory, allowed_hosts=("testserver",)))
+    results = []
+    threads = [threading.Thread(target=lambda: results.append(client.get("/v1/documents").status_code)) for _ in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert results == [200] * 4 and len(built) == 1
+
+
+def test_parent_passages_carry_the_document_source_tag(tmp_path):
+    client, service = make_client(tmp_path)
+    pages = [f"Section {i} " + " ".join(f"term{i}x{j}" for j in range(120)) for i in range(4)]
+    doc_id = upload(client, make_pdf(*pages), chunker="parent_child").json()["id"]
+    client.post(f"/v1/documents/{doc_id}/ask", json={"question": "section term"})
+    parents = service.store._docs[doc_id].parents
+    assert parents and all(p.meta.get("source") == doc_id for p in parents.values())

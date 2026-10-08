@@ -9,13 +9,14 @@ pipelines are used as they are: ingest() builds the workspace, RagPipeline answe
 """
 
 import json
+import os
 import re
 import shutil
 import threading
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 
 from rag.common.embed import Embedder
 from rag.common.llm import LLM
@@ -62,7 +63,12 @@ class DocumentService:
         self.traces_dir = traces_dir
         self.max_upload_bytes = max_upload_bytes
         self._ingest_lock = threading.Lock()  # one ingestion at a time: the embedder shares the GPU
+        self._status_lock = threading.Lock()  # one status.json writer at a time
+        self._load_lock = threading.Lock()  # a document is loaded into the store once
+        self._running: Set[str] = set()  # documents being ingested right now
+        self._deleting: Set[str] = set()  # documents deleted while an ingestion was still running
         self.store: ChunkStore = store or MemoryChunkStore()  # a vector database plugs in here
+        self._recover_interrupted()
 
     # ---- paths and status ---------------------------------------------------------------
 
@@ -70,26 +76,67 @@ class DocumentService:
         if not DOC_ID.match(doc_id):  # the id becomes part of a path, so only our own format passes
             raise NotFound(doc_id)
         path = self.root / doc_id
-        if not path.is_dir():
+        if doc_id in self._deleting or not path.is_dir():
             raise NotFound(doc_id)
         return path
 
+    @staticmethod
+    def _read_json(path: Path) -> Dict[str, Any]:
+        # The file is replaced atomically, but Windows can briefly refuse a read during the swap.
+        for attempt in range(5):
+            try:
+                return json.loads(path.read_text(encoding="utf-8"))
+            except (PermissionError, json.JSONDecodeError):
+                if attempt == 4:
+                    raise
+                time.sleep(0.05)
+        raise AssertionError("unreachable")
+
+    @staticmethod
+    def _atomic_write(path: Path, text: str) -> None:
+        """Write to a temporary file and swap it in, so a reader sees the old or new file, never half."""
+        temporary = path.with_name(path.name + ".tmp")
+        temporary.write_text(text, encoding="utf-8")
+        for attempt in range(5):
+            try:
+                os.replace(temporary, path)
+                return
+            except PermissionError:
+                if attempt == 4:
+                    raise
+                time.sleep(0.05)
+
     def _write_status(self, doc_id: str, **changes: Any) -> Dict[str, Any]:
-        path = self.root / doc_id / "status.json"
-        status = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
-        status.update(changes)
-        path.write_text(json.dumps(status, indent=2), encoding="utf-8")
+        directory = self._dir(doc_id)  # raises NotFound if the document was deleted meanwhile
+        path = directory / "status.json"
+        with self._status_lock:
+            status = self._read_json(path) if path.exists() else {}
+            status.update(changes)
+            self._atomic_write(path, json.dumps(status, indent=2))
         return status
 
+    def _recover_interrupted(self) -> None:
+        """A server restart kills background ingestion, so mark what was in flight as failed."""
+        for path in self.root.iterdir():
+            status_file = path / "status.json"
+            if DOC_ID.match(path.name) and status_file.exists():
+                status = self._read_json(status_file)
+                if status.get("state") in ("queued", "processing"):
+                    status.update(state="failed", error="interrupted by a server restart; upload the file again")
+                    self._atomic_write(status_file, json.dumps(status, indent=2))
+
     def get(self, doc_id: str) -> Dict[str, Any]:
-        return json.loads((self._dir(doc_id) / "status.json").read_text(encoding="utf-8"))
+        return self._read_json(self._dir(doc_id) / "status.json")
 
     def list(self) -> List[Dict[str, Any]]:
         found = []
-        for path in sorted(self.root.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True):
-            if DOC_ID.match(path.name) and (path / "status.json").exists():
-                found.append(self.get(path.name))
-        return found
+        for path in self.root.iterdir():
+            if DOC_ID.match(path.name):
+                try:
+                    found.append(self.get(path.name))
+                except (NotFound, OSError, ValueError):
+                    continue  # deleted, or not yet written, while we were listing
+        return sorted(found, key=lambda s: s.get("created", 0), reverse=True)
 
     # ---- upload and ingestion -----------------------------------------------------------
 
@@ -111,9 +158,10 @@ class DocumentService:
         )
 
     def run_ingestion(self, doc_id: str) -> None:
-        status = self.get(doc_id)
-        directory = self._dir(doc_id)
+        self._running.add(doc_id)
         try:
+            status = self.get(doc_id)
+            directory = self._dir(doc_id)
             with self._ingest_lock:
                 self._write_status(doc_id, state="processing")
                 # ingest names its outputs after the PDF file, so the stored name is fixed
@@ -122,13 +170,38 @@ class DocumentService:
             flagged = sum(r.flagged for r in scan_chunks(result.chunkset.chunks).values())
             self._write_status(doc_id, state="ready", chunks=len(result.chunkset.chunks),
                                flagged_chunks=flagged)
+        except NotFound:
+            pass  # deleted before or during ingestion: nothing left to report to
         except Exception as err:  # the status carries the reason; the server keeps running
-            self._write_status(doc_id, state="failed", error=f"{type(err).__name__}: {err}")
+            try:
+                self._write_status(doc_id, state="failed", error=f"{type(err).__name__}: {err}")
+            except NotFound:
+                pass
+        finally:
+            self._running.discard(doc_id)
+            if doc_id in self._deleting:  # ingestion may have recreated files after the delete
+                self._remove_tree(self.root / doc_id)
+                self.store.delete_document(doc_id)
+                self._deleting.discard(doc_id)
+
+    @staticmethod
+    def _remove_tree(path: Path) -> None:
+        for attempt in range(5):  # Windows refuses while a file is still open; wait and retry
+            try:
+                shutil.rmtree(path)
+                return
+            except FileNotFoundError:
+                return
+            except OSError:
+                time.sleep(0.2)
+        shutil.rmtree(path, ignore_errors=True)
 
     def delete(self, doc_id: str) -> None:
         directory = self._dir(doc_id)
+        if doc_id in self._running:  # the ingestion thread finishes the cleanup when it stops
+            self._deleting.add(doc_id)
         self.store.delete_document(doc_id)
-        shutil.rmtree(directory)
+        self._remove_tree(directory)
 
     # ---- asking -------------------------------------------------------------------------
 
@@ -137,7 +210,9 @@ class DocumentService:
         if status["state"] != "ready":
             raise BadUpload(f"document is {status['state']}, not ready")
         if not self.store.has_document(doc_id):  # first question since the server started
-            self._load_into_store(doc_id, status)
+            with self._load_lock:
+                if not self.store.has_document(doc_id):  # another request may have loaded it meanwhile
+                    self._load_into_store(doc_id, status)
         return RetrievalPipeline(self.store, self.embedder, Scope(LOCAL_OWNER, (doc_id,)), self.reranker)
 
     def _load_into_store(self, doc_id: str, status: Dict[str, Any]) -> None:
@@ -154,6 +229,7 @@ class DocumentService:
         parents = {}
         for parent in chunkset.parents.values():
             parent.chunk_id = qualify(parent.chunk_id)
+            parent.meta["source"] = doc_id  # a parent replaces its child in the context, so it needs the tag too
             parents[parent.chunk_id] = parent
         chunkset.parents = parents
         index_document(self.store, doc_id, LOCAL_OWNER, chunkset, index)

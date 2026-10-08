@@ -113,3 +113,54 @@ def test_copy_is_independent(store):
     other = store.copy()
     other.delete_document("d1")
     assert store.has_document("d1") and not other.has_document("d1")
+
+
+def test_a_failed_upsert_keeps_the_previous_copy(store):
+    fill(store)
+    with pytest.raises(ValueError, match="already belongs"):
+        store.upsert("d1", "alice", [chunk("a9", "new text"), chunk("b1", "steals an id from d2")],
+                     np.stack([vec(1), vec(0, 1)]), "m")
+    assert store.has_document("d1")
+    assert ids(store.search_keyword("compaction", 5, Scope("alice"))) == ["a2"]  # d1 is exactly as before
+
+
+def test_duplicate_ids_inside_one_document_are_rejected(store):
+    with pytest.raises(ValueError, match="unique within"):
+        store.upsert("d1", "alice", [chunk("x", "one"), chunk("x", "two")], np.stack([vec(1), vec(0, 1)]), "m")
+    assert not store.has_document("d1")
+
+
+def test_an_empty_document_can_be_searched_without_errors(store):
+    store.upsert("e", "alice", [], np.zeros((0, DIM), dtype=np.float32), "m")
+    assert store.search_dense(vec(1, 0), 5, Scope("alice")) == []
+    assert store.search_keyword("anything", 5, Scope("alice")) == []
+
+
+def test_searching_while_documents_are_added_and_removed_does_not_fail(store):
+    import threading
+
+    fill(store)
+    errors = []
+
+    def writer():
+        try:
+            for i in range(60):
+                store.upsert("w", "alice", [chunk(f"w{i}", "replication copies")], np.stack([vec(1, 0)]), "m")
+                store.delete_document("w")
+        except Exception as err:  # pragma: no cover - only runs when the store is not thread safe
+            errors.append(err)
+
+    def reader():
+        try:
+            for _ in range(120):
+                store.search_dense(vec(1, 0), 5, Scope("alice"))
+                store.search_keyword("replication", 5, Scope("alice"))
+        except Exception as err:  # pragma: no cover
+            errors.append(err)
+
+    threads = [threading.Thread(target=writer)] + [threading.Thread(target=reader) for _ in range(3)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert errors == []

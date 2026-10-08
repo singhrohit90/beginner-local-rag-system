@@ -20,9 +20,11 @@ There is no login yet.
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
+import threading
 from urllib.parse import urlparse
 
 from fastapi import APIRouter, BackgroundTasks, FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse, JSONResponse
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from pydantic import BaseModel, Field
@@ -84,9 +86,13 @@ def create_app(
     v1 = APIRouter(prefix="/v1")
     state: Dict[str, Optional[DocumentService]] = {"service": service}
 
+    build_lock = threading.Lock()
+
     def svc() -> DocumentService:
         if state["service"] is None:  # load the models on first use, not at import
-            state["service"] = service_factory()
+            with build_lock:  # two first requests must not each load the models
+                if state["service"] is None:
+                    state["service"] = service_factory()
         return state["service"]
 
     @app.get("/")
@@ -102,10 +108,10 @@ def create_app(
                      chunker: str = Form("recursive")) -> Dict[str, Any]:
         if chunker not in STRATEGIES:
             raise HTTPException(422, f"chunker must be one of {list(STRATEGIES)}")
-        service = svc()
+        service = await run_in_threadpool(svc)  # may load models: keep it off the event loop
         data = await file.read(service.max_upload_bytes + 1)
         try:
-            status = service.create(file.filename or "document.pdf", data, chunker)
+            status = await run_in_threadpool(service.create, file.filename or "document.pdf", data, chunker)
         except BadUpload as err:
             raise HTTPException(400, str(err))
         background.add_task(service.run_ingestion, status["id"])

@@ -38,6 +38,8 @@ class VectorIndex:
         text_of: Callable[[Chunk], str] = lambda c: c.text,
         **meta: Any,
     ) -> "VectorIndex":
+        if not chunks:
+            raise ValueError("no chunks to index")
         texts = [text_of(c) for c in chunks]
         info: Dict[str, Any] = dict(meta)
         count_tokens = getattr(embedder, "count_tokens", None)
@@ -51,6 +53,8 @@ class VectorIndex:
 
     def search(self, query_vector: np.ndarray, k: int) -> List[Tuple[int, float]]:
         """Top-k (row index, cosine similarity), best first."""
+        if len(self.vectors) == 0:
+            return []
         scores = self.vectors @ query_vector
         k = min(k, len(scores))
         top = np.argpartition(-scores, k - 1)[:k]

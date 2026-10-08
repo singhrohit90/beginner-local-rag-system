@@ -64,6 +64,8 @@ def ingest(
         logger.info("step 2 chunk: reusing %s", chunks_dir / f"{chunker}.jsonl")
         chunkset = load_chunkset(chunks_dir, chunker)
 
+    if not chunkset.chunks:
+        raise ValueError("no text could be extracted from this PDF (it may be scanned images; OCR is not supported yet)")
     logger.info("step 3 index: %d chunks", len(chunkset.chunks))
     index = get_index(chunkset, embedder, "plain", rebuild=force, root=out_dir)
     return IngestResult(chunkset, index)

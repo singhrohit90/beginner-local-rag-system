@@ -200,3 +200,14 @@ def test_select_context_does_not_cap_chunks_without_a_source():
     book = [make_chunk(i, f"Book passage {i} about storage engines. " * 5) for i in range(4)]
     by_id, ranked = _ranked(book)
     assert len(select_context(ranked, by_id, {}, ContextConfig())) == 4
+
+
+def test_overlap_is_only_judged_inside_one_document():
+    a = make_chunk(0, "alpha " * 50, span=(1000, 1300))
+    b = make_chunk(1, "beta " * 50, span=(1100, 1400))  # the same character range, but another document
+    a.meta["source"], b.meta["source"] = "doc-1", "doc-2"
+    by_id, ranked = _ranked([a, b])
+    kept = select_context(ranked, by_id, {}, ContextConfig(top_k=5))
+    assert [h.chunk_id for h in kept] == ["c0", "c1"]
+    b.meta["source"] = "doc-1"  # now they really do overlap
+    assert [h.chunk_id for h in select_context(ranked, by_id, {}, ContextConfig(top_k=5))] == ["c0"]

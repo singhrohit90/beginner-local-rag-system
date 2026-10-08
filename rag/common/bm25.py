@@ -48,6 +48,8 @@ class BM25Index:
         return math.log(1.0 + (self.n - df + 0.5) / (df + 0.5))
 
     def search(self, query: str, k: int) -> List[Tuple[int, float]]:
+        if self.n == 0:
+            return []
         scores = np.zeros(self.n, dtype=np.float32)
         for term in set(tokenize(query)):
             weight = self.idf(term)

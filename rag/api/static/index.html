@@ -124,8 +124,13 @@ async function refresh() {
     node.append(el("div", {}, del));
     box.append(node);
   }
+  if (docs.some((d) => d.state === "queued" || d.state === "processing")) schedulePoll();
+}
+
+function schedulePoll() {
   clearTimeout(poll);
-  if (docs.some((d) => d.state === "queued" || d.state === "processing")) poll = setTimeout(() => refresh().then(updateChat), 2000);
+  // a failed poll must not end polling, or the document looks stuck until the page is reloaded
+  poll = setTimeout(() => refresh().then(updateChat).catch((err) => { showError(err.message); schedulePoll(); }), 2000);
 }
 
 function select(id) { selected = id; $("log").replaceChildren(); $("detail").textContent = "Click an answer to see its passages and stage timings."; refresh().then(updateChat); }
