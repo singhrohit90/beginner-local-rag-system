@@ -27,6 +27,7 @@ every wrong answer can be traced to a stage.
 | `rag/observe/` | `retrieval_quality/` (metrics, failure diagnosis), `generation_quality/` (judge, answer scoring), `golden.py`, `golden_tools/` (helpers for writing the question set) |
 | `rag/security/` | poisoned documents and the injection test harness |
 | `rag/experiments/` | scripts that run a whole comparison and print a table |
+| `rag/api/` | the web API and chat page: `service.py` (work), `main.py` (routes), `static/index.html` (UI) |
 
 ## Read in this order
 
@@ -215,3 +216,17 @@ Metric notes:
   accident. Watch chunk page spans when comparing chunkers.
 - Page-level labels cannot tell whether the exact sentence was in the chunk. Add a text-containment
   check later if you need that precision.
+
+## Step 8: upload and chat UI
+
+    uvicorn rag.api.main:app --port 18642        # then open http://127.0.0.1:18642
+
+Upload a PDF, wait for it to show `ready`, select it and ask. Click an answer to see the passages
+the model was given (page, score, chunk id), which stages ran and how long each took, and what the
+guard did. Each upload gets its own folder `data/uploads/<doc_id>/` with its own index, so
+documents never mix; one document is searched at a time. Chat traces are saved to `runs/chat/`.
+
+Port 8000 is often taken on this machine by another service, so pick any free port. Models come
+from `.env` (`RAG_LLM`, `RAG_EMBEDDER`); if the model server is down, asking returns a 502 with
+the reason. The API is `POST /documents`, `GET /documents`, `GET /documents/{id}`,
+`POST /documents/{id}/ask` and `DELETE /documents/{id}`; its docs are at `/docs`.

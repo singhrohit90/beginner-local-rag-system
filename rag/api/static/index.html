@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RAG document chat</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --panel: #ffffff; --text: #1d2330; --muted: #5d6677; --line: #dde1e8;
+    --accent: #2f5fd0; --good: #1c7a46; --bad: #b3261e; --warn: #8a5a00;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #14171d; --panel: #1c212b; --text: #e6e9ef; --muted: #99a2b3; --line: #2c3340;
+            --accent: #7da2ff; --good: #5fcf92; --bad: #ff8a80; --warn: #e8b64a; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 14px/1.5 system-ui, sans-serif; background: var(--bg); color: var(--text); }
+  main { display: grid; grid-template-columns: 280px 1fr 360px; gap: 12px; padding: 12px; height: 100vh; }
+  section { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px;
+            overflow: auto; min-height: 0; }
+  h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin: 0 0 8px; }
+  .doc { padding: 8px; border: 1px solid var(--line); border-radius: 6px; margin-bottom: 6px; cursor: pointer; }
+  .doc.sel { border-color: var(--accent); }
+  .doc small, .meta { color: var(--muted); font-size: 12px; }
+  .state-ready { color: var(--good); } .state-failed { color: var(--bad); }
+  .state-queued, .state-processing { color: var(--warn); }
+  #chat { display: flex; flex-direction: column; }
+  #log { flex: 1; overflow: auto; }
+  .msg { margin: 0 0 10px; padding: 8px 10px; border-radius: 6px; white-space: pre-wrap; }
+  .q { background: var(--bg); } .a { border: 1px solid var(--line); cursor: pointer; }
+  .a.sel { border-color: var(--accent); }
+  .tag { display: inline-block; font-size: 11px; padding: 0 6px; border-radius: 8px; border: 1px solid var(--line); margin-right: 4px; }
+  .tag.bad { color: var(--bad); border-color: var(--bad); } .tag.warn { color: var(--warn); border-color: var(--warn); }
+  form.row { display: flex; gap: 6px; margin-top: 8px; }
+  input[type=text] { flex: 1; padding: 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--text); }
+  button, select { padding: 7px 12px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); color: var(--text); cursor: pointer; }
+  button.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+  button:disabled { opacity: .5; cursor: default; }
+  .passage { border: 1px solid var(--line); border-radius: 6px; padding: 8px; margin-bottom: 8px; }
+  .passage.cited { border-color: var(--good); }
+  .passage pre { margin: 6px 0 0; white-space: pre-wrap; font: 12px/1.45 ui-monospace, monospace; max-height: 180px; overflow: auto; }
+  table { border-collapse: collapse; width: 100%; font-size: 12px; } td, th { text-align: left; padding: 2px 6px; border-bottom: 1px solid var(--line); }
+  #upload { display: grid; gap: 6px; margin-bottom: 12px; }
+  #error { color: var(--bad); margin-top: 6px; }
+  @media (max-width: 900px) { main { grid-template-columns: 1fr; height: auto; } section { max-height: none; } }
+</style>
+</head>
+<body>
+<main>
+  <section>
+    <h2>Documents</h2>
+    <form id="upload">
+      <input type="file" id="file" accept="application/pdf,.pdf" required>
+      <select id="chunker" title="How the document is split into chunks">
+        <option value="recursive">recursive chunks</option>
+        <option value="heading">heading-aware chunks</option>
+        <option value="fixed">fixed-size chunks</option>
+        <option value="semantic">semantic chunks (slower)</option>
+        <option value="parent_child">parent-child chunks</option>
+      </select>
+      <button class="primary" type="submit">Upload and index</button>
+    </form>
+    <div id="docs"></div>
+  </section>
+
+  <section id="chat">
+    <h2 id="title">Select or upload a document</h2>
+    <div id="log"></div>
+    <div id="error"></div>
+    <form class="row" id="ask">
+      <input type="text" id="question" placeholder="Ask about the document" maxlength="2000" autocomplete="off" disabled>
+      <select id="config" title="Retrieval configuration">
+        <option value="weighted">hybrid (weighted)</option>
+        <option value="rrf">hybrid (rrf)</option>
+        <option value="dense">dense only</option>
+        <option value="bm25">keyword only</option>
+      </select>
+      <button class="primary" type="submit" id="send" disabled>Ask</button>
+    </form>
+  </section>
+
+  <section>
+    <h2>What the pipeline saw</h2>
+    <div id="detail" class="meta">Click an answer to see its passages and stage timings.</div>
+  </section>
+</main>
+
+<script>
+// Everything shown comes from documents or a model, so it is untrusted: only textContent is used, never innerHTML.
+const $ = (id) => document.getElementById(id);
+let docs = [], selected = null, answers = {}, poll = null;
+
+function el(tag, props = {}, ...kids) {
+  const node = document.createElement(tag);
+  for (const [k, v] of Object.entries(props)) { if (k === "class") node.className = v; else node[k] = v; }
+  for (const kid of kids) node.append(kid);
+  return node;
+}
+
+async function api(path, options) {
+  const res = await fetch(path, options);
+  if (!res.ok) {
+    let detail = res.statusText;
+    try { detail = (await res.json()).detail || detail; } catch (_) {}
+    throw new Error(`${res.status}: ${typeof detail === "string" ? detail : JSON.stringify(detail)}`);
+  }
+  return res.status === 204 ? null : res.json();
+}
+
+function showError(message) { $("error").textContent = message || ""; }
+
+async function refresh() {
+  docs = await api("/documents");
+  const box = $("docs"); box.replaceChildren();
+  for (const d of docs) {
+    const node = el("div", { class: "doc" + (selected === d.id ? " sel" : "") },
+      el("div", {}, d.name),
+      el("small", { class: "state-" + d.state }, d.state),
+      el("small", {}, d.state === "ready" ? ` · ${d.chunks} chunks · ${d.chunker}` + (d.flagged_chunks ? ` · ${d.flagged_chunks} flagged` : "") : ""),
+      el("small", {}, d.error ? " · " + d.error : ""));
+    node.onclick = () => select(d.id);
+    const del = el("button", { textContent: "Delete", title: "Delete this document" });
+    del.onclick = async (e) => { e.stopPropagation(); await api("/documents/" + d.id, { method: "DELETE" }); if (selected === d.id) selected = null; refresh(); updateChat(); };
+    node.append(el("div", {}, del));
+    box.append(node);
+  }
+  clearTimeout(poll);
+  if (docs.some((d) => d.state === "queued" || d.state === "processing")) poll = setTimeout(() => refresh().then(updateChat), 2000);
+}
+
+function select(id) { selected = id; $("log").replaceChildren(); $("detail").textContent = "Click an answer to see its passages and stage timings."; refresh().then(updateChat); }
+
+function updateChat() {
+  const d = docs.find((x) => x.id === selected);
+  $("title").textContent = d ? d.name : "Select or upload a document";
+  const ready = !!d && d.state === "ready";
+  $("question").disabled = !ready; $("send").disabled = !ready;
+  $("question").placeholder = !d ? "Select a document first" : ready ? "Ask about the document" : "Document is " + d.state + "...";
+}
+
+$("upload").onsubmit = async (e) => {
+  e.preventDefault(); showError("");
+  const form = new FormData();
+  form.append("file", $("file").files[0]); form.append("chunker", $("chunker").value);
+  try { const d = await api("/documents", { method: "POST", body: form }); selected = d.id; $("file").value = ""; }
+  catch (err) { showError(err.message); }
+  refresh().then(updateChat);
+};
+
+$("ask").onsubmit = async (e) => {
+  e.preventDefault(); showError("");
+  const question = $("question").value.trim(); if (!question || !selected) return;
+  $("question").value = ""; $("send").disabled = true;
+  $("log").append(el("div", { class: "msg q" }, question));
+  try {
+    const r = await api(`/documents/${selected}/ask`, { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ question, config: $("config").value }) });
+    answers[r.query_id] = r;
+    const msg = el("div", { class: "msg a" }, r.answer || "");
+    if (r.blocked.length) msg.prepend(el("span", { class: "tag bad" }, "withheld: " + r.blocked.join(", ")), el("br"));
+    if (r.abstained) msg.prepend(el("span", { class: "tag warn" }, "abstained"), el("br"));
+    msg.onclick = () => { document.querySelectorAll(".a").forEach((n) => n.classList.remove("sel")); msg.classList.add("sel"); detail(r); };
+    $("log").append(msg); msg.click(); msg.scrollIntoView();
+  } catch (err) { showError(err.message); }
+  $("send").disabled = false; $("question").focus();
+};
+
+function detail(r) {
+  const box = $("detail"); box.replaceChildren();
+  box.append(el("div", { class: "meta" }, `${r.llm} · ${r.seconds}s · cited: ${r.citations.join(", ") || "none"}`));
+  const table = el("table", {}, el("tr", {}, el("th", {}, "stage"), el("th", {}, "hits"), el("th", {}, "ms")));
+  for (const s of r.stages) table.append(el("tr", {}, el("td", {}, s.name), el("td", {}, String(s.hits)), el("td", {}, String(s.ms))));
+  box.append(el("h2", {}, "Stages"), table, el("h2", {}, "Passages sent to the model"));
+  for (const p of r.passages) {
+    const pages = p.page_start === p.page_end ? "p. " + p.page_start : `pp. ${p.page_start}-${p.page_end}`;
+    box.append(el("div", { class: "passage" + (r.citations.includes(p.label) ? " cited" : "") },
+      el("div", { class: "meta" }, `[${p.label}] ${pages} · score ${p.score} · ${p.chunk_id}`), el("pre", {}, p.text)));
+  }
+}
+
+refresh().then(updateChat).catch((err) => showError(err.message));
+</script>
+</body>
+</html>

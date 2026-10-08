@@ -3,3 +3,9 @@ numpy>=1.26
 pytest>=8
 # optional, only for semantic chunking and local embeddings:
 # sentence-transformers
+
+# web API (rag/api)
+fastapi>=0.110
+uvicorn>=0.29
+python-multipart>=0.0.9
+httpx>=0.27   # only for the API tests

@@ -18,9 +18,9 @@ from rag.common.embed import Embedder
 from rag.common.types import Chunk
 
 
-def index_dir(chunker: str, embedder_name: str, variant: str = "plain") -> Path:
+def index_dir(chunker: str, embedder_name: str, variant: str = "plain", root: Path = PROCESSED_DIR) -> Path:
     slug = re.sub(r"[^A-Za-z0-9]+", "-", embedder_name).strip("-")
-    return PROCESSED_DIR / "index" / f"{chunker}__{slug}__{variant}"
+    return root / "index" / f"{chunker}__{slug}__{variant}"
 
 
 @dataclass

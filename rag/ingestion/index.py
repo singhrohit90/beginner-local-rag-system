@@ -4,14 +4,21 @@ The vector index written here is what the query pipeline reads; it is the only l
 two pipelines. It is cached on disk and rebuilt only when the chunks changed.
 """
 
+from pathlib import Path
+
+from rag.common.config import PROCESSED_DIR
 from rag.common.embed import Embedder
 from rag.common.store import VectorIndex, index_dir
 from rag.ingestion.chunking.base import ChunkSet
 
 
-def get_index(chunkset: ChunkSet, embedder: Embedder, variant: str = "plain", rebuild: bool = False) -> VectorIndex:
-    """variant "plain" embeds the chunk text; "heading" embeds "section path + text"."""
-    directory = index_dir(chunkset.strategy, embedder.name, variant)
+def get_index(
+    chunkset: ChunkSet, embedder: Embedder, variant: str = "plain", rebuild: bool = False,
+    root: Path = PROCESSED_DIR,
+) -> VectorIndex:
+    """variant "plain" embeds the chunk text; "heading" embeds "section path + text".
+    The index is cached under root/index; the default keeps the book's index in data/processed."""
+    directory = index_dir(chunkset.strategy, embedder.name, variant, root)
     if directory.exists() and not rebuild:
         index = VectorIndex.load(directory)
         if index.matches(chunkset.chunks):

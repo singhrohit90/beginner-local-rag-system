@@ -14,9 +14,10 @@ import json
 import logging
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Optional
 
 from rag.common.config import PROCESSED_DIR
-from rag.common.embed import get_embedder
+from rag.common.embed import Embedder, get_embedder
 from rag.common.log import setup_logging
 from rag.common.store import VectorIndex
 from rag.ingestion.chunk import STRATEGIES, make_chunker
@@ -40,10 +41,11 @@ def ingest(
     embedder_spec: str = "st:sentence-transformers/all-mpnet-base-v2",
     out_dir: Path = PROCESSED_DIR,
     force: bool = False,
+    embedder: Optional[Embedder] = None,  # pass one in to reuse a loaded model (the API does)
 ) -> IngestResult:
     pages_path = out_dir / f"{pdf.stem}.pages.jsonl"
     toc_path = out_dir / f"{pdf.stem}.toc.json"
-    embedder = get_embedder(embedder_spec)
+    embedder = embedder or get_embedder(embedder_spec)
 
     if force or not pages_path.exists():
         logger.info("step 1 extract: %s", pdf)
@@ -63,7 +65,7 @@ def ingest(
         chunkset = load_chunkset(chunks_dir, chunker)
 
     logger.info("step 3 index: %d chunks", len(chunkset.chunks))
-    index = get_index(chunkset, embedder, "plain", rebuild=force)
+    index = get_index(chunkset, embedder, "plain", rebuild=force, root=out_dir)
     return IngestResult(chunkset, index)
 
 

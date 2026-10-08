@@ -170,3 +170,5 @@ runs/
 !uploaded_files/*.pdf
 .env
 data/golden/batch*.jsonl
+
+data/uploads/
