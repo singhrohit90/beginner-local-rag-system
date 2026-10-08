@@ -53,6 +53,7 @@ DEFENSES: Dict[str, tuple] = {
     "scan": ("scan",),
     "spotlight": ("spotlight",),
     "output_filter": ("filter",),
+    "scan_filter": ("scan", "filter"),  # no prompt change: for a model that spotlighting makes cautious
     "all": ("scan", "spotlight", "filter"),
 }
 
