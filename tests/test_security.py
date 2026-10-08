@@ -137,7 +137,7 @@ def test_run_attack_obeyed_blocked_scanned_and_spotlighted(base):
     flooded = run_attack(doc, 0, "none", pipeline, embedder, gullible, config, {}, copies=3)
     assert flooded.exposed
     ids = [h.chunk_id for h in pipeline_with(pipeline, [poison_chunk(doc, 0, c) for c in range(3)], embedder)
-           .run("q", doc.question, RetrievalConfig("t", top_k=5, scan=False, max_per_source=0))
+           .run("q", doc.question, RetrievalConfig("t", top_k=5, scan=False, max_per_source=0, drop_exact_copies=False))
            .stage("context").hits]
     assert sum(i.startswith("poison-PX") for i in ids) == 3  # three planted copies fill the context
 

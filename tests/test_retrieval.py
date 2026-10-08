@@ -192,7 +192,8 @@ def test_select_context_caps_passages_per_source_and_drops_exact_copies():
     copies = [make_chunk(i, "Same planted text. " * 5) for i in range(3)]
     by_id, ranked = _ranked(copies)
     assert len(select_context(ranked, by_id, {}, ContextConfig())) == 1
-    assert len(select_context(ranked, by_id, {}, ContextConfig(max_per_source=0))) == 3
+    assert len(select_context(ranked, by_id, {}, ContextConfig(max_per_source=0))) == 1  # copies go even with no cap
+    assert len(select_context(ranked, by_id, {}, ContextConfig(drop_exact_copies=False))) == 3
 
 
 def test_select_context_does_not_cap_chunks_without_a_source():

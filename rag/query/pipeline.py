@@ -124,7 +124,8 @@ class RetrievalPipeline:
             by_id,
             parents,
             ContextConfig(config.top_k, config.max_words, use_parents=config.use_parents,
-                          scan=config.scan, max_per_source=0 if single_document else config.max_per_source),
+                          scan=config.scan, max_per_source=0 if single_document else config.max_per_source,
+                          drop_exact_copies=config.drop_exact_copies),
         )
         trace.record("context", "transform", context)
         return trace

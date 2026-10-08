@@ -6,7 +6,7 @@ many passages one source document may contribute, and stop at `top_k` passages o
 Overlapping chunks are common (the fixed and recursive chunkers use overlap), and sending the same
 text twice wastes the budget that other evidence needs.
 
-The scan and the per-source cap are security defences. The scan skips a flagged passage and the
+The scan, the exact-copy drop and the per-source cap are security defences. The scan skips a flagged passage and the
 next candidate takes its place. The cap stops one document, or many copies of one text, from
 filling the context (a flooding attack). A chunk's source is `meta["source"]`; chunks without one,
 such as the book's own, are not capped. Upload code must set it to the document id.
@@ -26,7 +26,8 @@ class ContextConfig:
     overlap_threshold: float = 0.5  # drop a passage if this share of it is already selected
     use_parents: bool = True
     scan: bool = True  # skip passages that look like injected instructions
-    max_per_source: int = 2  # passages one source may add; 0 turns the cap and exact-copy drop off
+    max_per_source: int = 2  # passages one source may add; 0 turns the cap off
+    drop_exact_copies: bool = True  # never send the same passage text twice
 
 
 def _overlap(a: Chunk, b: Chunk) -> float:
@@ -70,11 +71,10 @@ def select_context(
             continue
         source = chunk.meta.get("source")
         key = " ".join(chunk.text.split()).lower()
-        if config.max_per_source:
-            if key in seen_text:
-                continue
-            if source is not None and per_source.get(source, 0) >= config.max_per_source:
-                continue
+        if config.drop_exact_copies and key in seen_text:
+            continue
+        if config.max_per_source and source is not None and per_source.get(source, 0) >= config.max_per_source:
+            continue
         size = len(chunk.text.split())
         if chosen and words + size > config.max_words:
             continue

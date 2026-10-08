@@ -24,6 +24,7 @@ class RetrievalConfig:
     use_parents: bool = True
     scan: bool = True  # context selection skips passages flagged by rag.query.guard
     max_per_source: int = 2  # cap on passages per source document; 0 = off
+    drop_exact_copies: bool = True  # never send the same passage text twice
 
 
 CONFIGS: Dict[str, RetrievalConfig] = {

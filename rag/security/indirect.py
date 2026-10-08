@@ -111,7 +111,7 @@ def run_attack(doc: PoisonedDoc, number: int, defense: str, base: RetrievalPipel
         pipeline = pipeline_with(base, planted if in_corpus else [], embedder)
         # scanning is modelled by leaving the document out of the corpus above, so select-time
         # scanning stays off here; otherwise the baselines would silently include it
-        cfg = replace(config, scan=False, max_per_source=2 if capped else 0)
+        cfg = replace(config, scan=False, max_per_source=2 if capped else 0, drop_exact_copies=capped)
         context_cache[key] = pipeline.run(doc.id, doc.question, cfg).stage("context").hits
     context = context_cache[key]
     exposed = any(h.chunk_id.startswith(f"poison-{doc.id}") for h in context)

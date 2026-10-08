@@ -159,3 +159,12 @@ def test_a_single_document_is_not_cut_down_by_the_per_source_cap(tmp_path):
     body = client.post(f"/v1/documents/{doc_id}/ask", json={"question": "node discussion", "config": "bm25"}).json()
     assert len(body["passages"]) > 2  # five passages are allowed; the cap only matters when many documents compete
     assert all(p["chunk_id"].startswith(f"{doc_id}:") for p in body["passages"])
+
+
+def test_a_single_document_repeating_one_passage_sends_it_once(tmp_path):
+    client, _ = make_client(tmp_path)
+    page = "Identical boilerplate paragraph about replication lag. " * 30
+    doc_id = upload(client, make_pdf(page, page, page, page), chunker="fixed").json()["id"]
+    body = client.post(f"/v1/documents/{doc_id}/ask", json={"question": "replication lag boilerplate", "config": "bm25"}).json()
+    texts = [" ".join(p["text"].split()) for p in body["passages"]]
+    assert len(texts) == len(set(texts)) and len(texts) >= 1
