@@ -21,7 +21,7 @@ every wrong answer can be traced to a stage.
 
 | Folder | Holds |
 |--------|-------|
-| `rag/common/` | what both pipelines share: `types`, `config`, `trace`, `llm`, `embed`, and `chunk_store` (the interface the query side reads through, with an in-memory implementation built on `store` and `bm25`) |
+| `rag/common/` | what both pipelines share: `types`, `config`, `trace`, `llm`, `embed`, and `chunk_store` (the interface the query side reads through, with an in-memory implementation built on `store` and `bm25`), and `opensearch_store` (the same interface on a vector database) |
 | `rag/ingestion/` | the ingestion pipeline and its steps; `chunking/` has the five strategies |
 | `rag/query/` | the query pipeline and its steps, `configs.py` for the named retrieval configs |
 | `rag/observe/` | `retrieval_quality/` (metrics, failure diagnosis), `generation_quality/` (judge, answer scoring), `golden.py`, `golden_tools/` (helpers for writing the question set) |
@@ -230,3 +230,24 @@ Port 8000 is often taken on this machine by another service, so pick any free po
 from `.env` (`RAG_LLM`, `RAG_EMBEDDER`); if the model server is down, asking returns a 502 with
 the reason. The API is `POST /v1/documents`, `GET /v1/documents`, `GET /v1/documents/{id}`,
 `POST /v1/documents/{id}/ask` and `DELETE /v1/documents/{id}`; its docs are at `/docs`. See `docs/auth_plan.md` and `docs/mcp_risks.md` before exposing it.
+
+## Step 9: vector database (OpenSearch)
+
+    docker compose up -d opensearch          # run in WSL; listens on 127.0.0.1:9200 only
+    RAG_STORE=opensearch uvicorn rag.api.main:app --port 18642
+
+`RAG_STORE=memory` (default) keeps vectors in memory and rebuilds them from `data/uploads/` after a
+restart. `RAG_STORE=opensearch` keeps text, vectors and keyword index in the database, so the server can
+restart without re-reading any file. Both implement `ChunkStore`, and `tests/test_chunk_store.py` runs
+the same checks against each (the OpenSearch ones are skipped when the database is not running).
+
+Every search filters on owner and document ids inside the query. Dense search is exact by default
+(scores every vector in scope, same ranking as the in-memory store); `OpenSearchChunkStore(exact=False)`
+uses HNSW. The score returned is the plain cosine similarity. Keyword search uses OpenSearch's BM25 with
+its `english` analyzer, which is not identical to the in-memory BM25, so check retrieval quality on the
+golden set before relying on it (the next stage).
+
+The compose file turns the security plugin off, which is only acceptable because the port is published
+on 127.0.0.1. Stop it with `docker compose down` (add `-v` to delete the stored data).
+From this Windows machine the repository folder is not visible inside WSL, so start it with
+`cat docker-compose.yml | wsl -d Ubuntu-24.04 -- docker compose -f - up -d opensearch`.

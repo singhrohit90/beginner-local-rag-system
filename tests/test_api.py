@@ -3,6 +3,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from rag.api.main import create_app
+from rag.common.chunk_store import Scope
 from rag.api.service import DocumentService
 from rag.common.embed import HashingEmbedder
 from rag.common.llm import FakeLLM
@@ -315,3 +316,45 @@ def test_model_errors_do_not_reveal_internal_addresses(tmp_path):
     doc_id = upload(client, make_pdf(REPLICATION)).json()["id"]
     detail = client.post(f"/v1/documents/{doc_id}/ask", json={"question": "replication"}).json()["detail"]
     assert "127.22.10.1" not in detail and "cannot reach the model server" in detail
+
+
+def opensearch_client_or_skip():
+    from tests.test_chunk_store import OPENSEARCH_URL, opensearch_reachable
+
+    if not opensearch_reachable():
+        pytest.skip(f"OpenSearch is not running at {OPENSEARCH_URL}")
+    return OPENSEARCH_URL
+
+
+def test_the_api_works_on_opensearch_and_survives_a_restart(tmp_path):
+    from rag.common.opensearch_store import OpenSearchChunkStore, unique_prefix
+
+    url = opensearch_client_or_skip()
+    embedder = HashingEmbedder()
+    prefix = unique_prefix()
+
+    def new_service():
+        store = OpenSearchChunkStore(embedder.name, embedder.dim, url=url, prefix=prefix)
+        return DocumentService(root=tmp_path / "uploads", embedder=embedder, embedder_spec="hash",
+                               llm=FakeLLM(lambda s, u: "Copies live on several nodes [S1]."), store=store), store
+
+    service, store = new_service()
+    client = TestClient(create_app(service, allowed_hosts=("testserver",)))
+    try:
+        doc_id = upload(client, make_pdf(REPLICATION, COMPACTION)).json()["id"]
+        body = client.post(f"/v1/documents/{doc_id}/ask", json={"question": "replication node failure"}).json()
+        assert body["passages"] and body["passages"][0]["chunk_id"].startswith(f"{doc_id}:")
+
+        # a new server process: empty memory, same database. Without the chunk files it can only answer from OpenSearch.
+        import shutil
+
+        shutil.rmtree(tmp_path / "uploads" / doc_id / "chunks")
+        service2, _ = new_service()
+        client2 = TestClient(create_app(service2, allowed_hosts=("testserver",)))
+        again = client2.post(f"/v1/documents/{doc_id}/ask", json={"question": "replication node failure"})
+        assert again.status_code == 200 and again.json()["passages"][0]["text"] == body["passages"][0]["text"]
+
+        assert client2.delete(f"/v1/documents/{doc_id}").status_code == 204
+        assert not store.has_document(doc_id) and store.search_keyword("replication", 5, Scope("local")) == []
+    finally:
+        store.drop_indexes()

@@ -1,6 +1,8 @@
 """Behaviour every ChunkStore must have. STORES lists the implementations under test; a database
 store is added to this list when it exists, so both run the same checks."""
 
+import os
+
 import numpy as np
 import pytest
 
@@ -20,9 +22,31 @@ def chunk(cid, text, **meta):
     return Chunk(cid, text, 1, 1, "test", meta=meta)
 
 
-@pytest.fixture(params=["memory"])
+OPENSEARCH_URL = os.environ.get("RAG_OPENSEARCH_URL", "http://127.0.0.1:9200")
+
+
+def opensearch_reachable() -> bool:
+    try:
+        from opensearchpy import OpenSearch
+
+        OpenSearch(hosts=[OPENSEARCH_URL], timeout=2, max_retries=0).info()
+        return True
+    except Exception:
+        return False
+
+
+@pytest.fixture(params=["memory", "opensearch"])
 def store(request):
-    return MemoryChunkStore()
+    if request.param == "memory":
+        yield MemoryChunkStore()
+        return
+    if not opensearch_reachable():
+        pytest.skip(f"OpenSearch is not running at {OPENSEARCH_URL} (docker compose up -d opensearch)")
+    from rag.common.opensearch_store import OpenSearchChunkStore, unique_prefix
+
+    database = OpenSearchChunkStore("m", DIM, url=OPENSEARCH_URL, prefix=unique_prefix())
+    yield database
+    database.drop_indexes()
 
 
 def fill(store):
@@ -109,6 +133,8 @@ def test_vector_and_chunk_counts_must_match(store):
 
 
 def test_copy_is_independent(store):
+    if not hasattr(store, "copy"):
+        pytest.skip("copy() is only part of the in-memory store, used by the injection harness")
     fill(store)
     other = store.copy()
     other.delete_document("d1")

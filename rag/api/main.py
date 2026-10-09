@@ -57,9 +57,21 @@ def build_default_service() -> DocumentService:
     from rag.common.secrets import setting
 
     spec = setting("RAG_EMBEDDER", "st:sentence-transformers/all-mpnet-base-v2")
+    embedder = get_embedder(spec)
+    kind = setting("RAG_STORE", "memory")
+    if kind == "opensearch":  # vectors and text live in the database and survive a restart
+        from rag.common.opensearch_store import OpenSearchChunkStore
+
+        store = OpenSearchChunkStore(embedder.name, embedder.dim,
+                                     url=setting("RAG_OPENSEARCH_URL", "http://127.0.0.1:9200"))
+    elif kind == "memory":
+        store = None  # rebuilt from the files in data/uploads at the first question
+    else:
+        raise ValueError(f"RAG_STORE must be 'memory' or 'opensearch', not {kind!r}")
     return DocumentService(
         root=DATA_DIR / "uploads",
-        embedder=get_embedder(spec),
+        embedder=embedder,
+        store=store,
         embedder_spec=spec,
         # no cache: it would keep every uploaded passage and question on disk after a delete
         llm=get_llm(setting("RAG_LLM", "vllm:/models/gpt-oss-20b"), cache_dir=None),
