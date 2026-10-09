@@ -68,6 +68,11 @@
     <div id="log"></div>
     <div id="error"></div>
     <form class="row" id="ask">
+      <select id="scope" title="Which documents to search">
+        <option value="one">this document</option>
+        <option value="checked">checked documents</option>
+        <option value="all">all my documents</option>
+      </select>
       <input type="text" id="question" placeholder="Ask about the document" maxlength="2000" autocomplete="off" disabled>
       <select id="config" title="Retrieval configuration">
         <option value="weighted">hybrid (weighted)</option>
@@ -89,6 +94,7 @@
 // Everything shown comes from documents or a model, so it is untrusted: only textContent is used, never innerHTML.
 const $ = (id) => document.getElementById(id);
 let docs = [], selected = null, answers = {}, poll = null;
+const checked = new Set();
 
 function el(tag, props = {}, ...kids) {
   const node = document.createElement(tag);
@@ -119,8 +125,13 @@ async function refresh() {
       el("small", {}, d.state === "ready" ? ` · ${d.chunks} chunks · ${d.chunker}` + (d.flagged_chunks ? ` · ${d.flagged_chunks} flagged` : "") : ""),
       el("small", {}, d.error ? " · " + d.error : ""));
     node.onclick = () => select(d.id);
+    if (d.state === "ready") {
+      const pick = el("input", { type: "checkbox", checked: checked.has(d.id), title: "Include in questions over checked documents" });
+      pick.onclick = (e) => { e.stopPropagation(); if (pick.checked) checked.add(d.id); else checked.delete(d.id); updateChat(); };
+      node.prepend(pick);
+    }
     const del = el("button", { textContent: "Delete", title: "Delete this document" });
-    del.onclick = async (e) => { e.stopPropagation(); await api("/v1/documents/" + d.id, { method: "DELETE" }); if (selected === d.id) selected = null; refresh(); updateChat(); };
+    del.onclick = async (e) => { e.stopPropagation(); await api("/v1/documents/" + d.id, { method: "DELETE" }); if (selected === d.id) selected = null; checked.delete(d.id); refresh().then(updateChat); };
     node.append(el("div", {}, del));
     box.append(node);
   }
@@ -135,13 +146,24 @@ function schedulePoll() {
 
 function select(id) { selected = id; $("log").replaceChildren(); $("detail").textContent = "Click an answer to see its passages and stage timings."; refresh().then(updateChat); }
 
+function targets() {
+  // the document ids a question goes to: null means every ready document, [] means nothing to ask
+  const readyIds = docs.filter((x) => x.state === "ready").map((x) => x.id);
+  const scope = $("scope").value;
+  if (scope === "all") return readyIds.length ? null : [];
+  if (scope === "checked") return readyIds.filter((id) => checked.has(id));
+  return readyIds.includes(selected) ? [selected] : [];
+}
+
 function updateChat() {
   const d = docs.find((x) => x.id === selected);
-  $("title").textContent = d ? d.name : "Select or upload a document";
-  const ready = !!d && d.state === "ready";
-  $("question").disabled = !ready; $("send").disabled = !ready;
-  $("question").placeholder = !d ? "Select a document first" : ready ? "Ask about the document" : "Document is " + d.state + "...";
+  const scope = $("scope").value, ids = targets();
+  const can = ids === null || ids.length > 0;
+  $("title").textContent = scope === "all" ? "All my documents" : scope === "checked" ? `Checked documents (${checked.size})` : d ? d.name : "Select or upload a document";
+  $("question").disabled = !can; $("send").disabled = !can;
+  $("question").placeholder = can ? "Ask a question" : scope === "checked" ? "Tick at least one ready document" : d && d.state !== "ready" ? "Document is " + d.state + "..." : "Select a document first";
 }
+$("scope").onchange = updateChat;
 
 $("upload").onsubmit = async (e) => {
   e.preventDefault(); showError("");
@@ -154,12 +176,12 @@ $("upload").onsubmit = async (e) => {
 
 $("ask").onsubmit = async (e) => {
   e.preventDefault(); showError("");
-  const question = $("question").value.trim(); if (!question || !selected) return;
+  const question = $("question").value.trim(); const ids = targets(); if (!question || (ids !== null && !ids.length)) return;
   $("question").value = ""; $("send").disabled = true;
   $("log").append(el("div", { class: "msg q" }, question));
   try {
-    const r = await api(`/v1/documents/${selected}/ask`, { method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ question, config: $("config").value }) });
+    const r = await api("/v1/ask", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ question, doc_ids: ids, config: $("config").value }) });
     answers[r.query_id] = r;
     const msg = el("div", { class: "msg a" }, r.answer || "");
     if (r.blocked.length) msg.prepend(el("span", { class: "tag bad" }, "withheld: " + r.blocked.join(", ")), el("br"));
@@ -184,7 +206,7 @@ function detail(r) {
   for (const p of r.passages) {
     const pages = p.page_start === p.page_end ? "p. " + p.page_start : `pp. ${p.page_start}-${p.page_end}`;
     box.append(el("div", { class: "passage" + (r.citations.includes(p.label) ? " cited" : "") },
-      el("div", { class: "meta" }, `[${p.label}] ${pages} · score ${p.score} · ${p.chunk_id}`), el("pre", {}, p.text)));
+      el("div", { class: "meta" }, `[${p.label}] ${r.documents.length > 1 ? p.doc_name + " · " : ""}${pages} · score ${p.score} · ${p.chunk_id}`), el("pre", {}, p.text)));
   }
 }
 

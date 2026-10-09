@@ -17,7 +17,7 @@ import threading
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Sequence, Set
 
 from rag.common.embed import Embedder
 from rag.common.llm import LLM
@@ -216,15 +216,30 @@ class DocumentService:
 
     # ---- asking -------------------------------------------------------------------------
 
-    def _retrieval(self, doc_id: str, owner: str) -> RetrievalPipeline:
-        status = self.get(doc_id, owner)
-        if status["state"] != "ready":
-            raise BadUpload(f"document is {status['state']}, not ready")
+    def _ready_documents(self, owner: str, doc_ids: Optional[Sequence[str]]) -> List[Dict[str, Any]]:
+        """The caller's documents that a question may use. None means every ready document they own.
+        An id that is not theirs is NotFound, exactly as if it did not exist."""
+        if doc_ids is None:
+            ready = [status for status in self.list(owner) if status["state"] == "ready"]
+            if not ready:
+                raise BadUpload("you have no documents that are ready yet")
+            return ready
+        statuses: List[Dict[str, Any]] = []
+        for doc_id in dict.fromkeys(doc_ids):  # drops repeats, keeps the order
+            status = self.get(doc_id, owner)
+            if status["state"] != "ready":
+                raise BadUpload(f"document {status['name']!r} is {status['state']}, not ready")
+            statuses.append(status)
+        if not statuses:
+            raise BadUpload("choose at least one document")
+        return statuses
+
+    def _ensure_loaded(self, status: Dict[str, Any]) -> None:
+        doc_id = status["id"]
         if not self.store.has_document(doc_id):  # first question since the server started
             with self._load_lock:
                 if not self.store.has_document(doc_id):  # another request may have loaded it meanwhile
                     self._load_into_store(doc_id, status)
-        return RetrievalPipeline(self.store, self.embedder, Scope(owner, (doc_id,)), self.reranker)
 
     def _load_into_store(self, doc_id: str, status: Dict[str, Any]) -> None:
         directory = self._dir(doc_id)
@@ -247,13 +262,26 @@ class DocumentService:
 
     def ask(self, doc_id: str, owner: str, question: str, config: str = "weighted",
             style: str = "standard") -> Dict[str, Any]:
-        retrieval = self._retrieval(doc_id, owner)
+        return self.ask_documents(owner, [doc_id], question, config, style)
+
+    def ask_documents(self, owner: str, doc_ids: Optional[Sequence[str]], question: str,
+                      config: str = "weighted", style: str = "standard") -> Dict[str, Any]:
+        """Answer from one, several or (doc_ids None) all of the owner's documents."""
+        statuses = self._ready_documents(owner, doc_ids)
+        for status in statuses:
+            self._ensure_loaded(status)
+        names = {status["id"]: status["name"] for status in statuses}
+        retrieval = RetrievalPipeline(self.store, self.embedder, Scope(owner, tuple(names)), self.reranker)
+        single = len(statuses) == 1
         started = time.perf_counter()
-        query_id = f"{doc_id}-{int(time.time() * 1000)}"
+        query_id = f"{statuses[0]['id'] if single else 'multi'}-{int(time.time() * 1000)}"
         trace = RagPipeline(retrieval, self.llm, style=style, subject="document").run(query_id, question, CONFIGS[config])
-        if self.keep_traces:  # inside the document's folder, so deleting the document deletes them
+        if self.keep_traces and single:
+            # Inside the document's folder, so deleting the document deletes its traces. A question over
+            # several documents is not saved: its trace holds passages from all of them, and deleting
+            # one document could not remove them.
             try:
-                trace.save(self._dir(doc_id) / "chat")
+                trace.save(self._dir(statuses[0]["id"]) / "chat")
             except NotFound:
                 pass  # deleted while the model was answering
         usage = trace.config.get("usage", {})
@@ -264,8 +292,10 @@ class DocumentService:
             "abstained": usage.get("abstained", False),
             "blocked": usage.get("blocked", []),
             "citations": trace.citations,
+            "documents": [{"id": doc_id, "name": name} for doc_id, name in names.items()],
             "passages": [
-                {"label": f"S{i}", "chunk_id": h.chunk_id, "page_start": h.page_start,
+                {"label": f"S{i}", "chunk_id": h.chunk_id, "doc_id": h.chunk_id.split(":", 1)[0],
+                 "doc_name": names.get(h.chunk_id.split(":", 1)[0], ""), "page_start": h.page_start,
                  "page_end": h.page_end, "score": round(h.score, 4), "text": h.text}
                 for i, h in enumerate(context, start=1)
             ],

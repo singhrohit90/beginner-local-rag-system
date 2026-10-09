@@ -7,6 +7,7 @@ Endpoints (the API is /v1; the page at / is only one client of it)
     GET    /v1/documents              list documents with their status
     GET    /v1/documents/{id}         one document's status (queued, processing, ready, failed)
     POST   /v1/documents/{id}/ask     {"question": "..."} -> answer, passages, trace stages
+    POST   /v1/ask                    {"question": "...", "doc_ids": [...] or null}: several or all of your documents
     DELETE /v1/documents/{id}
     GET    /v1/health
 
@@ -54,6 +55,10 @@ class AskRequest(BaseModel):
     question: str = Field(min_length=1, max_length=2000)
     config: str = "weighted"
     style: str = "standard"
+
+
+class AskAcrossRequest(AskRequest):
+    doc_ids: Optional[List[str]] = Field(None, max_length=50)  # null: every ready document you own
 
 
 def build_default_service() -> DocumentService:
@@ -172,6 +177,23 @@ def create_app(
         except Exception as err:  # most often the model server being unreachable
             logger.exception("ask failed for document %s", doc_id)
             # the caller gets the reason without internal addresses; the full error is in the server log
+            reason = re.sub(r"https?://\S+", "<url>", str(err))[:200]
+            raise HTTPException(502, f"{type(err).__name__}: {reason}")
+
+    @v1.post("/ask")
+    def ask_across(request: AskAcrossRequest, owner: str = Depends(current_owner)) -> Dict[str, Any]:
+        if request.config not in USABLE_CONFIGS:
+            raise HTTPException(422, f"config must be one of {USABLE_CONFIGS}")
+        if request.style not in ("standard", "spotlight"):
+            raise HTTPException(422, "style must be standard or spotlight")
+        try:
+            return svc().ask_documents(owner, request.doc_ids, request.question, request.config, request.style)
+        except NotFound:
+            raise HTTPException(404, "no such document")
+        except BadUpload as err:
+            raise HTTPException(409, str(err))
+        except Exception as err:
+            logger.exception("ask across documents failed")
             reason = re.sub(r"https?://\S+", "<url>", str(err))[:200]
             raise HTTPException(502, f"{type(err).__name__}: {reason}")
 

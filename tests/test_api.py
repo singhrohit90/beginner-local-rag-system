@@ -432,3 +432,65 @@ def test_documents_from_before_owners_existed_belong_to_the_local_user(two_users
     assert client.get(f"/v1/documents/{doc_id}").status_code == 200
     who["name"] = "bob"
     assert client.get(f"/v1/documents/{doc_id}").status_code == 404
+
+
+# ---- asking across several documents ------------------------------------------------------------
+
+def test_a_question_can_span_all_of_a_users_documents_and_names_each_source(two_users):
+    client, service, who = two_users
+    a = upload(client, make_pdf(REPLICATION)).json()["id"]
+    b = upload(client, make_pdf(COMPACTION), name="log-store.pdf").json()["id"]
+
+    both = client.post("/v1/ask", json={"question": "replication of data and compaction of segments", "config": "bm25"}).json()
+    assert {p["doc_id"] for p in both["passages"]} == {a, b}  # null doc_ids = everything the user owns
+    assert {d["id"] for d in both["documents"]} == {a, b}
+    names = {p["doc_id"]: p["doc_name"] for p in both["passages"]}
+    assert names[b] == "log-store.pdf" and all(p["chunk_id"].startswith(p["doc_id"] + ":") for p in both["passages"])
+
+    only_b = client.post("/v1/ask", json={"question": "replication of data and compaction of segments",
+                                           "doc_ids": [b], "config": "bm25"}).json()
+    assert {p["doc_id"] for p in only_b["passages"]} == {b}
+
+
+def test_a_question_over_documents_never_includes_another_users_document(two_users):
+    client, service, who = two_users
+    alice_doc = upload(client, make_pdf(REPLICATION)).json()["id"]
+    who["name"] = "bob"
+    bob_doc = upload(client, make_pdf(COMPACTION)).json()["id"]
+
+    everything = client.post("/v1/ask", json={"question": "replication of data nodes", "config": "bm25"}).json()
+    assert {p["doc_id"] for p in everything["passages"]} <= {bob_doc}  # "all" means all of bob's, not everyone's
+    mixed = client.post("/v1/ask", json={"question": "replication", "doc_ids": [bob_doc, alice_doc]})
+    assert mixed.status_code == 404  # one foreign id fails the whole request: no partial answer, no hint
+    assert client.post("/v1/ask", json={"question": "replication", "doc_ids": [alice_doc]}).status_code == 404
+
+
+def test_asking_across_documents_reports_unusable_requests(two_users):
+    client, service, who = two_users
+    assert client.post("/v1/ask", json={"question": "anything"}).status_code == 409  # nothing uploaded yet
+    broken = upload(client, blank_pdf()).json()["id"]
+    assert client.post("/v1/ask", json={"question": "x", "doc_ids": [broken]}).status_code == 409  # failed document
+    assert client.post("/v1/ask", json={"question": "x", "doc_ids": []}).status_code == 409
+    assert client.post("/v1/ask", json={"question": "x", "doc_ids": ["../../etc"]}).status_code == 404
+    assert client.post("/v1/ask", json={"question": ""}).status_code == 422
+    assert client.post("/v1/ask", json={"question": "x", "config": "rrf_rerank"}).status_code == 422
+
+
+def test_one_document_cannot_crowd_the_others_out_of_a_cross_document_answer(two_users):
+    client, service, who = two_users
+    many = [f"Topic {i} node discussion: " + " ".join(f"word{i}x{j} node" for j in range(60)) for i in range(5)]
+    big = upload(client, make_pdf(*many), chunker="fixed").json()["id"]
+    small = upload(client, make_pdf("A short note about the node setup. " * 5)).json()["id"]
+    body = client.post("/v1/ask", json={"question": "node discussion setup", "config": "bm25"}).json()
+    from_big = [p for p in body["passages"] if p["doc_id"] == big]
+    assert len(from_big) <= 2 and any(p["doc_id"] == small for p in body["passages"])  # the per-source cap applies
+
+
+def test_only_single_document_questions_are_saved_as_traces(two_users):
+    client, service, who = two_users
+    a = upload(client, make_pdf(REPLICATION)).json()["id"]
+    b = upload(client, make_pdf(COMPACTION)).json()["id"]
+    client.post("/v1/ask", json={"question": "replication and compaction"})
+    assert not list(service.root.rglob("chat/*.json"))  # a trace over two documents could not be deleted with either
+    client.post(f"/v1/documents/{a}/ask", json={"question": "replication"})
+    assert len(list((service.root / a / "chat").glob("*.json"))) == 1 and not (service.root / b / "chat").exists()
