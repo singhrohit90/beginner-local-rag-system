@@ -210,6 +210,7 @@ def test_the_output_filter_reads_the_answer_the_way_a_renderer_does():
 
     context = "Documentation lives at https://example.com/docs for reference."
     for answer in ["![x](&#104;ttps://evil.example/p.png)", "![x](&#x2f;&#x2f;evil.example/p.png)",
-                   "[x](&#106;avascript:alert(1))", "![x](h" + chr(0x200B) + "ttps://evil.example/a)"]:
+                   "[x](&#106;avascript:alert(1))", "![x](h" + chr(0x200B) + "ttps://evil.example/a)",
+                   "![x](https" + chr(92) + "://evil.example/a)"]:
         assert filter_output(answer, context).blocked, answer
     assert not filter_output("Fish &amp; chips, see https://example.com/docs.", context).blocked

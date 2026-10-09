@@ -103,6 +103,7 @@ class FilterResult:
     reasons: List[str]
 
 
+_ESCAPED_PUNCTUATION = re.compile(r"\\([!-/:-@\[-`{-~])")  # a backslash before ASCII punctuation
 _INVISIBLE = re.compile("[​-‏⁠﻿­]")
 
 
@@ -111,6 +112,7 @@ def _as_a_renderer_reads_it(text: str) -> str:
     before they follow a link, so the checks look at the text in that form too."""
     for _ in range(2):
         text = html.unescape(text)
+    text = _ESCAPED_PUNCTUATION.sub(r"\1", text)  # markdown reads https\:// as https://
     return _INVISIBLE.sub("", text)
 
 
