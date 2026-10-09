@@ -25,13 +25,13 @@ import re
 import threading
 from urllib.parse import urlparse
 
-from fastapi import APIRouter, BackgroundTasks, FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse, JSONResponse
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from pydantic import BaseModel, Field
 
-from rag.api.service import BadUpload, DocumentService, NotFound
+from rag.api.service import LOCAL_OWNER, BadUpload, DocumentService, NotFound
 from rag.ingestion.chunk import STRATEGIES
 from rag.query.configs import CONFIGS
 
@@ -41,6 +41,13 @@ logger = logging.getLogger("rag.api")
 USABLE_CONFIGS = sorted(name for name, c in CONFIGS.items() if not c.rerank)
 DEFAULT_HOSTS = ("127.0.0.1", "localhost")
 STATE_CHANGING = {"POST", "PUT", "PATCH", "DELETE"}
+
+
+def current_owner() -> str:
+    """Who is calling. There is no login yet, so everyone is the one local user. Keycloak will
+    replace this function and nothing else (docs/auth_plan.md); tests override it to act as two
+    users. It must never read the owner from a header or a field the caller controls."""
+    return LOCAL_OWNER
 
 
 class AskRequest(BaseModel):
@@ -120,44 +127,44 @@ def create_app(
 
     @v1.post("/documents", status_code=202)
     async def upload(background: BackgroundTasks, file: UploadFile = File(...),
-                     chunker: str = Form("recursive")) -> Dict[str, Any]:
+                     chunker: str = Form("recursive"), owner: str = Depends(current_owner)) -> Dict[str, Any]:
         if chunker not in STRATEGIES:
             raise HTTPException(422, f"chunker must be one of {list(STRATEGIES)}")
         service = await run_in_threadpool(svc)  # may load models: keep it off the event loop
         data = await file.read(service.max_upload_bytes + 1)
         try:
-            status = await run_in_threadpool(service.create, file.filename or "document.pdf", data, chunker)
+            status = await run_in_threadpool(service.create, file.filename or "document.pdf", data, owner, chunker)
         except BadUpload as err:
             raise HTTPException(400, str(err))
         background.add_task(service.run_ingestion, status["id"])
         return status
 
     @v1.get("/documents")
-    def list_documents() -> List[Dict[str, Any]]:
-        return svc().list()
+    def list_documents(owner: str = Depends(current_owner)) -> List[Dict[str, Any]]:
+        return svc().list(owner)
 
     @v1.get("/documents/{doc_id}")
-    def get_document(doc_id: str) -> Dict[str, Any]:
+    def get_document(doc_id: str, owner: str = Depends(current_owner)) -> Dict[str, Any]:
         try:
-            return svc().get(doc_id)
+            return svc().get(doc_id, owner)
         except NotFound:
             raise HTTPException(404, "no such document")
 
     @v1.delete("/documents/{doc_id}", status_code=204)
-    def delete_document(doc_id: str) -> None:
+    def delete_document(doc_id: str, owner: str = Depends(current_owner)) -> None:
         try:
-            svc().delete(doc_id)
+            svc().delete(doc_id, owner)
         except NotFound:
             raise HTTPException(404, "no such document")
 
     @v1.post("/documents/{doc_id}/ask")
-    def ask(doc_id: str, request: AskRequest) -> Dict[str, Any]:
+    def ask(doc_id: str, request: AskRequest, owner: str = Depends(current_owner)) -> Dict[str, Any]:
         if request.config not in USABLE_CONFIGS:
             raise HTTPException(422, f"config must be one of {USABLE_CONFIGS}")
         if request.style not in ("standard", "spotlight"):
             raise HTTPException(422, "style must be standard or spotlight")
         try:
-            return svc().ask(doc_id, request.question, request.config, request.style)
+            return svc().ask(doc_id, owner, request.question, request.config, request.style)
         except NotFound:
             raise HTTPException(404, "no such document")
         except BadUpload as err:

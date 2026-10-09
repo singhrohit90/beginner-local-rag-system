@@ -1,3 +1,5 @@
+import json
+
 import pymupdf
 import pytest
 from fastapi.testclient import TestClient
@@ -192,7 +194,7 @@ def test_interrupted_documents_are_marked_failed_after_a_restart(tmp_path):
     service._write_status(doc_id, state="processing")  # as if the server died mid-ingestion
     restarted = DocumentService(root=tmp_path / "uploads", embedder=HashingEmbedder(), embedder_spec="hash",
                                 llm=FakeLLM(lambda s, u: "x"))
-    status = restarted.get(doc_id)
+    status = restarted.get(doc_id, "local")
     assert status["state"] == "failed" and "restart" in status["error"]
 
 
@@ -209,7 +211,7 @@ def test_deleting_a_document_while_it_is_being_indexed_leaves_nothing_behind(tmp
 
     service = DocumentService(root=tmp_path / "uploads", embedder=SlowEmbedder(), embedder_spec="hash",
                               llm=FakeLLM(lambda s, u: "x"))
-    doc_id = service.create("book.pdf", make_pdf(REPLICATION))["id"]
+    doc_id = service.create("book.pdf", make_pdf(REPLICATION), "local")["id"]
     failures = []
 
     def background():
@@ -221,11 +223,11 @@ def test_deleting_a_document_while_it_is_being_indexed_leaves_nothing_behind(tmp
     worker = threading.Thread(target=background)
     worker.start()
     assert started.wait(5)
-    service.delete(doc_id)  # lands while the vectors are being computed
+    service.delete(doc_id, "local")  # lands while the vectors are being computed
     release.set()
     worker.join(10)
     assert failures == [] and not worker.is_alive()
-    assert service.list() == [] and not (tmp_path / "uploads" / doc_id).exists()
+    assert service.list("local") == [] and not (tmp_path / "uploads" / doc_id).exists()
     assert not service.store.has_document(doc_id)
 
 
@@ -246,8 +248,8 @@ def test_status_can_be_read_while_it_is_being_rewritten(tmp_path):
     def reader():
         try:
             for _ in range(150):
-                service.get(doc_id)
-                service.list()
+                service.get(doc_id, "local")
+                service.list("local")
         except Exception as err:  # pragma: no cover
             errors.append(err)
 
@@ -358,3 +360,75 @@ def test_the_api_works_on_opensearch_and_survives_a_restart(tmp_path):
         assert not store.has_document(doc_id) and store.search_keyword("replication", 5, Scope("local")) == []
     finally:
         store.drop_indexes()
+
+
+# ---- two users: nothing one owner uploads is visible to another -------------------------------------
+
+@pytest.fixture(params=["memory", "opensearch"])
+def two_users(request, tmp_path):
+    """(client, service, who): who["name"] chooses which user the next request acts as."""
+    from rag.api.main import current_owner
+
+    store, cleanup = None, None
+    if request.param == "opensearch":
+        from rag.common.opensearch_store import OpenSearchChunkStore, unique_prefix
+
+        url = opensearch_client_or_skip()
+        embedder = HashingEmbedder()
+        store = OpenSearchChunkStore(embedder.name, embedder.dim, url=url, prefix=unique_prefix())
+        cleanup = store.drop_indexes
+    service = DocumentService(root=tmp_path / "uploads", embedder=HashingEmbedder(), embedder_spec="hash",
+                              llm=FakeLLM(lambda s, u: "An answer [S1]."), store=store)
+    app = create_app(service, allowed_hosts=("testserver",))
+    who = {"name": "alice"}
+    app.dependency_overrides[current_owner] = lambda: who["name"]
+    yield TestClient(app), service, who
+    if cleanup:
+        cleanup()
+
+
+def test_one_users_documents_are_invisible_to_another(two_users):
+    client, service, who = two_users
+    alice_doc = upload(client, make_pdf(REPLICATION)).json()["id"]
+    assert client.post(f"/v1/documents/{alice_doc}/ask", json={"question": "replication"}).status_code == 200
+
+    who["name"] = "bob"
+    assert client.get("/v1/documents").json() == []  # bob sees nothing of alice's
+    assert client.get(f"/v1/documents/{alice_doc}").status_code == 404  # 404, not 403: existence is not revealed
+    assert client.post(f"/v1/documents/{alice_doc}/ask", json={"question": "replication"}).status_code == 404
+    assert client.delete(f"/v1/documents/{alice_doc}").status_code == 404
+
+    who["name"] = "alice"
+    assert [d["id"] for d in client.get("/v1/documents").json()] == [alice_doc]  # bob's attempts changed nothing
+    assert client.post(f"/v1/documents/{alice_doc}/ask", json={"question": "replication"}).status_code == 200
+
+
+def test_each_user_only_ever_gets_their_own_passages(two_users):
+    client, service, who = two_users
+    alice_doc = upload(client, make_pdf(REPLICATION)).json()["id"]
+    who["name"] = "bob"
+    bob_doc = upload(client, make_pdf(COMPACTION)).json()["id"]
+    assert client.get(f"/v1/documents/{bob_doc}").json()["owner"] == "bob"
+
+    answer = client.post(f"/v1/documents/{bob_doc}/ask", json={"question": "replication copies of data on nodes"}).json()
+    assert answer["passages"] and all("Replication" not in p["text"] for p in answer["passages"])  # alice's text never reaches bob
+    assert all(p["chunk_id"].startswith(f"{bob_doc}:") for p in answer["passages"])
+
+    # even with the service's own scope helper, naming alice's document as bob finds nothing
+    from rag.common.chunk_store import Scope
+
+    assert service.store.search_keyword("replication", 10, Scope("bob", (alice_doc,))) == []
+    assert all(c.chunk_id.startswith(bob_doc) for c, _ in service.store.search_keyword("compaction", 10, Scope("bob")))
+
+
+def test_documents_from_before_owners_existed_belong_to_the_local_user(two_users):
+    client, service, who = two_users
+    who["name"] = "local"
+    doc_id = upload(client, make_pdf(REPLICATION)).json()["id"]
+    status_file = service.root / doc_id / "status.json"
+    status = json.loads(status_file.read_text(encoding="utf-8"))
+    del status["owner"]  # an upload made by the earlier version
+    status_file.write_text(json.dumps(status), encoding="utf-8")
+    assert client.get(f"/v1/documents/{doc_id}").status_code == 200
+    who["name"] = "bob"
+    assert client.get(f"/v1/documents/{doc_id}").status_code == 404

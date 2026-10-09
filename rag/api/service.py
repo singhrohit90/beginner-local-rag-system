@@ -32,7 +32,7 @@ from rag.query.rerank import Reranker
 
 logger = logging.getLogger("rag.api")
 DOC_ID = re.compile(r"^[0-9a-f]{12}$")
-LOCAL_OWNER = "local"  # every document has this owner until real users arrive (see docs/auth_plan.md)
+LOCAL_OWNER = "local"  # the owner until real users arrive, and of any upload made before owners existed
 STATES = ("queued", "processing", "ready", "failed")
 
 
@@ -125,22 +125,30 @@ class DocumentService:
                     status.update(state="failed", error="interrupted by a server restart; upload the file again")
                     self._atomic_write(status_file, json.dumps(status, indent=2))
 
-    def get(self, doc_id: str) -> Dict[str, Any]:
+    def _status(self, doc_id: str) -> Dict[str, Any]:
+        """A document's status with no owner check. Internal: background work and recovery use it."""
         return self._read_json(self._dir(doc_id) / "status.json")
 
-    def list(self) -> List[Dict[str, Any]]:
+    def get(self, doc_id: str, owner: str) -> Dict[str, Any]:
+        """Another owner's document is reported as not found, so its existence does not leak."""
+        status = self._status(doc_id)
+        if status.get("owner", LOCAL_OWNER) != owner:
+            raise NotFound(doc_id)
+        return status
+
+    def list(self, owner: str) -> List[Dict[str, Any]]:
         found = []
         for path in self.root.iterdir():
             if DOC_ID.match(path.name):
                 try:
-                    found.append(self.get(path.name))
+                    found.append(self.get(path.name, owner))
                 except (NotFound, OSError, ValueError):
-                    continue  # deleted, or not yet written, while we were listing
+                    continue  # not this owner's, deleted, or not yet written, while we were listing
         return sorted(found, key=lambda s: s.get("created", 0), reverse=True)
 
     # ---- upload and ingestion -----------------------------------------------------------
 
-    def create(self, filename: str, data: bytes, chunker: str = "recursive") -> Dict[str, Any]:
+    def create(self, filename: str, data: bytes, owner: str, chunker: str = "recursive") -> Dict[str, Any]:
         """Validate and store an upload. Ingestion runs separately (run_ingestion)."""
         if len(data) > self.max_upload_bytes:
             raise BadUpload(f"file is larger than {self.max_upload_bytes // (1024 * 1024)} MB")
@@ -153,14 +161,14 @@ class DocumentService:
         # the user's filename is only a label; it never becomes a path
         label = re.sub(r"[^\w .()\-]", "_", Path(filename).name)[:120] or "document.pdf"
         return self._write_status(
-            doc_id, id=doc_id, name=label, chunker=chunker, state="queued", error=None,
+            doc_id, id=doc_id, name=label, owner=owner, chunker=chunker, state="queued", error=None,
             chunks=0, flagged_chunks=0, created=time.time(),
         )
 
     def run_ingestion(self, doc_id: str) -> None:
         self._running.add(doc_id)
         try:
-            status = self.get(doc_id)
+            status = self._status(doc_id)
             directory = self._dir(doc_id)
             with self._ingest_lock:
                 self._write_status(doc_id, state="processing")
@@ -198,7 +206,8 @@ class DocumentService:
                 time.sleep(0.2)
         shutil.rmtree(path, ignore_errors=True)
 
-    def delete(self, doc_id: str) -> None:
+    def delete(self, doc_id: str, owner: str) -> None:
+        self.get(doc_id, owner)  # NotFound unless it is this owner's
         directory = self._dir(doc_id)
         if doc_id in self._running:  # the ingestion thread finishes the cleanup when it stops
             self._deleting.add(doc_id)
@@ -207,15 +216,15 @@ class DocumentService:
 
     # ---- asking -------------------------------------------------------------------------
 
-    def _retrieval(self, doc_id: str) -> RetrievalPipeline:
-        status = self.get(doc_id)
+    def _retrieval(self, doc_id: str, owner: str) -> RetrievalPipeline:
+        status = self.get(doc_id, owner)
         if status["state"] != "ready":
             raise BadUpload(f"document is {status['state']}, not ready")
         if not self.store.has_document(doc_id):  # first question since the server started
             with self._load_lock:
                 if not self.store.has_document(doc_id):  # another request may have loaded it meanwhile
                     self._load_into_store(doc_id, status)
-        return RetrievalPipeline(self.store, self.embedder, Scope(LOCAL_OWNER, (doc_id,)), self.reranker)
+        return RetrievalPipeline(self.store, self.embedder, Scope(owner, (doc_id,)), self.reranker)
 
     def _load_into_store(self, doc_id: str, status: Dict[str, Any]) -> None:
         directory = self._dir(doc_id)
@@ -234,10 +243,11 @@ class DocumentService:
             parent.meta["source"] = doc_id  # a parent replaces its child in the context, so it needs the tag too
             parents[parent.chunk_id] = parent
         chunkset.parents = parents
-        index_document(self.store, doc_id, LOCAL_OWNER, chunkset, index)
+        index_document(self.store, doc_id, status.get("owner", LOCAL_OWNER), chunkset, index)
 
-    def ask(self, doc_id: str, question: str, config: str = "weighted", style: str = "standard") -> Dict[str, Any]:
-        retrieval = self._retrieval(doc_id)
+    def ask(self, doc_id: str, owner: str, question: str, config: str = "weighted",
+            style: str = "standard") -> Dict[str, Any]:
+        retrieval = self._retrieval(doc_id, owner)
         started = time.perf_counter()
         query_id = f"{doc_id}-{int(time.time() * 1000)}"
         trace = RagPipeline(retrieval, self.llm, style=style, subject="document").run(query_id, question, CONFIGS[config])
