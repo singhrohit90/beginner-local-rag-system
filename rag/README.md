@@ -265,6 +265,13 @@ question. One question is 2.7 points, so differences of a few points are noise. 
 seconds per question including evaluation work, against 0.02 to 0.2 in memory; exact scoring plus
 returning vectors for the cosine costs that at this size. Approximate (HNSW) search was not measured.
 
+Answer quality through OpenSearch (`python -m rag.experiments.answer --store opensearch`, gpt-oss-20b,
+semantic + weighted), against the in-memory run: correct 0.722 against 0.750, faithful 0.865 against
+0.838, cites the gold page 0.811 against 0.784; 23 against 24 fully correct and grounded answers, 6 of 6
+unanswerable questions refused, 2 of 2 attacks passed, no canary leaks. A difference of one question is
+2.7 points, so the two are the same within noise. An earlier attempt at this run was discarded because the
+model tunnel dropped partway (30 questions ended in pipeline errors).
+
 The compose file turns the security plugin off, which is only acceptable because the port is published
 on 127.0.0.1. Stop it with `docker compose down` (add `-v` to delete the stored data).
 From this Windows machine the repository folder is not visible inside WSL, so start it with

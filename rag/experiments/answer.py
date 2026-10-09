@@ -63,6 +63,10 @@ def main() -> None:
                         help="prompt style; spotlight is the hardened prompt from rag.security.defenses")
     parser.add_argument("--no-output-filter", action="store_true",
                         help="do not withhold answers that look hijacked (for comparisons only)")
+    parser.add_argument("--store", choices=["memory", "opensearch"], default="memory",
+                        help="where the chunks live while searching; opensearch needs `docker compose up -d opensearch`")
+    parser.add_argument("--opensearch-url", default="http://127.0.0.1:9200")
+    parser.add_argument("--opensearch-prefix", default="ragbook", help="index prefix for the book, apart from uploads")
     parser.add_argument("--workers", type=int, default=4)
     parser.add_argument("--limit", type=int, default=0, help="only the first N questions")
     parser.add_argument("--name", default=None)
@@ -80,7 +84,17 @@ def main() -> None:
     chunkset = load_chunkset(args.chunks_dir, args.chunker)
     index = get_index(chunkset, embedder, "plain", rebuild=False)
     reranker = CrossEncoderReranker() if config.rerank else None
-    retrieval = RetrievalPipeline.from_chunkset(chunkset, index, embedder, reranker)
+    if args.store == "opensearch":
+        from rag.common.chunk_store import Scope
+        from rag.common.opensearch_store import OpenSearchChunkStore
+        from rag.ingestion.index import index_document
+
+        database = OpenSearchChunkStore(embedder.name, embedder.dim, url=args.opensearch_url,
+                                        prefix=args.opensearch_prefix)
+        index_document(database, args.chunker, "local", chunkset, index)
+        retrieval = RetrievalPipeline(database, embedder, Scope("local", (args.chunker,)), reranker)
+    else:
+        retrieval = RetrievalPipeline.from_chunkset(chunkset, index, embedder, reranker)
     generator = get_llm(args.llm)
     judge = None if args.judge == "none" else get_llm(args.judge)  # none: skip correctness judging
     pipeline = RagPipeline(retrieval, generator, style=args.style, output_filter=not args.no_output_filter)
