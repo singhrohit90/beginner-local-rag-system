@@ -102,3 +102,12 @@ def test_pages_roundtrip(tmp_path):
     out = tmp_path / "out" / "book.pages.jsonl"
     save_pages(pages, out)
     assert load_pages(out) == pages
+
+
+def test_a_monospaced_block_made_only_of_blanks_does_not_crash():
+    from rag.ingestion.extract import _block_text
+
+    span = {"text": "    ", "flags": 8, "bbox": (10, 10, 50, 20)}  # 8 = monospaced
+    block = {"lines": [{"spans": [span], "bbox": (10, 10, 50, 20)}, {"spans": [span], "bbox": (10, 22, 50, 32)}]}
+    text, is_code = _block_text(block)
+    assert text.strip() == "" and is_code is False

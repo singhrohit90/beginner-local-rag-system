@@ -9,6 +9,7 @@ pipelines are used as they are: ingest() builds the workspace, RagPipeline answe
 """
 
 import json
+import logging
 import os
 import re
 import shutil
@@ -29,6 +30,7 @@ from rag.query.guard import scan_chunks
 from rag.query.pipeline import RagPipeline, RetrievalPipeline
 from rag.query.rerank import Reranker
 
+logger = logging.getLogger("rag.api")
 DOC_ID = re.compile(r"^[0-9a-f]{12}$")
 LOCAL_OWNER = "local"  # every document has this owner until real users arrive (see docs/auth_plan.md)
 STATES = ("queued", "processing", "ready", "failed")
@@ -171,8 +173,10 @@ class DocumentService:
         except NotFound:
             pass  # deleted before or during ingestion: nothing left to report to
         except Exception as err:  # the status carries the reason; the server keeps running
+            logger.exception("ingestion of %s failed", doc_id)  # the full traceback stays in the server log
             try:
-                self._write_status(doc_id, state="failed", error=f"{type(err).__name__}: {err}")
+                self._write_status(doc_id, state="failed",
+                                   error=f"{type(err).__name__}: {str(err) or 'no details, see the server log'}")
             except NotFound:
                 pass
         finally:

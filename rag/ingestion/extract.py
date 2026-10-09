@@ -64,8 +64,10 @@ def _block_text(block: dict) -> tuple:
         return "\n".join(_line_text(line["spans"]) for line in lines), False
 
     # Code keeps its line breaks and indentation. Indent is measured in character cells.
-    first = next(s for line in lines for s in line["spans"] if s["text"].strip())
-    cell = (first["bbox"][2] - first["bbox"][0]) / max(len(first["text"]), 1) or 1.0
+    first = next((s for line in lines for s in line["spans"] if s["text"].strip()), None)
+    if first is None:  # monospaced but only blanks: nothing to keep, and no character width to measure
+        return "\n".join(_line_text(line["spans"]) for line in lines), False
+    cell =(first["bbox"][2] - first["bbox"][0]) / max(len(first["text"]), 1) or 1.0
     left = min(line["bbox"][0] for line in lines)
     out = []
     for line in lines:
