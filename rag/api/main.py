@@ -3,7 +3,8 @@
     uvicorn rag.api.main:app --port 8000        then open http://127.0.0.1:8000
 
 Endpoints (the API is /v1; the page at / is only one client of it)
-    POST   /v1/documents              upload a PDF, ingestion runs in the background
+    POST   /v1/documents              upload a PDF, ingestion runs in the background (202); the same
+                                      file again by the same owner returns that document with duplicate=true (200)
     GET    /v1/documents              list documents with their status
     GET    /v1/documents/{id}         one document's status (queued, processing, ready, failed)
     POST   /v1/documents/{id}/ask     {"question": "..."} -> answer, passages, trace stages
@@ -141,6 +142,8 @@ def create_app(
             status = await run_in_threadpool(service.create, file.filename or "document.pdf", data, owner, chunker)
         except BadUpload as err:
             raise HTTPException(400, str(err))
+        if status.get("duplicate"):  # already uploaded by this owner: nothing new to index
+            return JSONResponse(status, status_code=200)
         background.add_task(service.run_ingestion, status["id"])
         return status
 

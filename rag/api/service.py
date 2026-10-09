@@ -8,6 +8,7 @@ so documents never share an index and deleting one is deleting its folder. The e
 pipelines are used as they are: ingest() builds the workspace, RagPipeline answers from it.
 """
 
+import hashlib
 import json
 import logging
 import os
@@ -67,6 +68,7 @@ class DocumentService:
         self._ingest_lock = threading.Lock()  # one ingestion at a time: the embedder shares the GPU
         self._status_lock = threading.Lock()  # one status.json writer at a time
         self._load_lock = threading.Lock()  # a document is loaded into the store once
+        self._create_lock = threading.Lock()  # two identical uploads at once must not both pass the duplicate check
         self._running: Set[str] = set()  # documents being ingested right now
         self._deleting: Set[str] = set()  # documents deleted while an ingestion was still running
         self.store: ChunkStore = store or MemoryChunkStore()  # a vector database plugs in here
@@ -154,16 +156,24 @@ class DocumentService:
             raise BadUpload(f"file is larger than {self.max_upload_bytes // (1024 * 1024)} MB")
         if not data.startswith(b"%PDF"):  # trust the content, not the extension
             raise BadUpload("not a PDF file")
-        doc_id = uuid.uuid4().hex[:12]
-        directory = self.root / doc_id
-        directory.mkdir(parents=True)
-        (directory / "source.pdf").write_bytes(data)
-        # the user's filename is only a label; it never becomes a path
-        label = re.sub(r"[^\w .()\-]", "_", Path(filename).name)[:120] or "document.pdf"
-        return self._write_status(
-            doc_id, id=doc_id, name=label, owner=owner, chunker=chunker, state="queued", error=None,
-            chunks=0, flagged_chunks=0, created=time.time(),
-        )
+        digest = hashlib.sha256(data).hexdigest()
+        with self._create_lock:
+            # The same file uploaded again by the same owner is the same document. A failed one may be
+            # retried, and another owner's copy is theirs alone. Uploads made before this check existed
+            # have no hash and are not recognised.
+            for existing in self.list(owner):
+                if existing.get("sha256") == digest and existing["state"] != "failed":
+                    return {**existing, "duplicate": True}
+            doc_id = uuid.uuid4().hex[:12]
+            directory = self.root / doc_id
+            directory.mkdir(parents=True)
+            (directory / "source.pdf").write_bytes(data)
+            # the user's filename is only a label; it never becomes a path
+            label = re.sub(r"[^\w .()\-]", "_", Path(filename).name)[:120] or "document.pdf"
+            return self._write_status(
+                doc_id, id=doc_id, name=label, owner=owner, sha256=digest, chunker=chunker, state="queued",
+                error=None, chunks=0, flagged_chunks=0, created=time.time(),
+            )
 
     def run_ingestion(self, doc_id: str) -> None:
         self._running.add(doc_id)

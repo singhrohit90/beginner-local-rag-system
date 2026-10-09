@@ -169,7 +169,10 @@ $("upload").onsubmit = async (e) => {
   e.preventDefault(); showError("");
   const form = new FormData();
   form.append("file", $("file").files[0]); form.append("chunker", $("chunker").value);
-  try { const d = await api("/v1/documents", { method: "POST", body: form }); selected = d.id; $("file").value = ""; }
+  try {
+    const d = await api("/v1/documents", { method: "POST", body: form }); selected = d.id; $("file").value = "";
+    if (d.duplicate) showError(`You already uploaded this file as "${d.name}", so it was selected instead of indexed again.`);
+  }
   catch (err) { showError(err.message); }
   refresh().then(updateChat);
 };

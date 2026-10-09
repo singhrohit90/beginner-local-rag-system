@@ -494,3 +494,35 @@ def test_only_single_document_questions_are_saved_as_traces(two_users):
     assert not list(service.root.rglob("chat/*.json"))  # a trace over two documents could not be deleted with either
     client.post(f"/v1/documents/{a}/ask", json={"question": "replication"})
     assert len(list((service.root / a / "chat").glob("*.json"))) == 1 and not (service.root / b / "chat").exists()
+
+
+# ---- duplicate uploads ------------------------------------------------------------------------------
+
+def test_the_same_file_uploaded_twice_by_one_user_is_one_document(two_users):
+    client, service, who = two_users
+    pdf = make_pdf(REPLICATION)
+    first = upload(client, pdf, name="book.pdf")
+    second = upload(client, pdf, name="renamed copy.pdf")  # same content, different name
+    assert first.status_code == 202 and second.status_code == 200
+    assert second.json()["id"] == first.json()["id"] and second.json()["duplicate"] is True
+    assert "duplicate" not in first.json() and len(client.get("/v1/documents").json()) == 1
+    assert upload(client, make_pdf(COMPACTION)).status_code == 202  # different content is a new document
+    assert len(client.get("/v1/documents").json()) == 2
+
+
+def test_two_users_may_each_upload_the_same_file(two_users):
+    client, service, who = two_users
+    pdf = make_pdf(REPLICATION)
+    alice_doc = upload(client, pdf).json()["id"]
+    who["name"] = "bob"
+    response = upload(client, pdf)  # bob must not be told alice has this file, nor be given her document
+    assert response.status_code == 202 and response.json()["id"] != alice_doc and "duplicate" not in response.json()
+
+
+def test_a_failed_upload_can_be_tried_again(two_users):
+    client, service, who = two_users
+    pdf = blank_pdf()
+    first = upload(client, pdf).json()["id"]
+    assert client.get(f"/v1/documents/{first}").json()["state"] == "failed"  # no text in it
+    again = upload(client, pdf)
+    assert again.status_code == 202 and again.json()["id"] != first
