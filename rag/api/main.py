@@ -33,7 +33,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from pydantic import BaseModel, Field
 
-from rag.api.service import LOCAL_OWNER, BadUpload, DocumentService, NotFound
+from rag.api.service import DEFAULT_MAX_UPLOAD_BYTES, LOCAL_OWNER, BadUpload, DocumentService, NotFound, TooLarge
 from rag.ingestion.chunk import STRATEGIES
 from rag.query.configs import CONFIGS
 
@@ -103,6 +103,16 @@ def create_app(
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=list(allowed_hosts))
 
     @app.middleware("http")
+    async def reject_oversize_uploads(request: Request, call_next):
+        # Refuse on the declared size before the body is read. The service checks again for clients that
+        # send no Content-Length. A little headroom covers the multipart framing around the file.
+        declared = request.headers.get("content-length", "")
+        if (request.method == "POST" and request.url.path == "/v1/documents" and declared.isdigit()
+                and int(declared) > DEFAULT_MAX_UPLOAD_BYTES + 1024 * 1024):
+            return JSONResponse({"detail": "file is too large"}, status_code=413)
+        return await call_next(request)
+
+    @app.middleware("http")
     async def reject_foreign_origins(request: Request, call_next):
         origin = request.headers.get("origin")
         if origin is not None and request.method in STATE_CHANGING:
@@ -140,6 +150,8 @@ def create_app(
         data = await file.read(service.max_upload_bytes + 1)
         try:
             status = await run_in_threadpool(service.create, file.filename or "document.pdf", data, owner, chunker)
+        except TooLarge as err:
+            raise HTTPException(413, str(err))
         except BadUpload as err:
             raise HTTPException(400, str(err))
         if status.get("duplicate"):  # already uploaded by this owner: nothing new to index
@@ -165,40 +177,34 @@ def create_app(
         except NotFound:
             raise HTTPException(404, "no such document")
 
-    @v1.post("/documents/{doc_id}/ask")
-    def ask(doc_id: str, request: AskRequest, owner: str = Depends(current_owner)) -> Dict[str, Any]:
+    def answer_request(request: AskRequest, call: Callable[[], Dict[str, Any]], what: str) -> Dict[str, Any]:
+        """Validate the options, run the question, and map failures to HTTP errors. Shared by both ask routes."""
         if request.config not in USABLE_CONFIGS:
             raise HTTPException(422, f"config must be one of {USABLE_CONFIGS}")
         if request.style not in ("standard", "spotlight"):
             raise HTTPException(422, "style must be standard or spotlight")
         try:
-            return svc().ask(doc_id, owner, request.question, request.config, request.style)
+            return call()
         except NotFound:
             raise HTTPException(404, "no such document")
         except BadUpload as err:
             raise HTTPException(409, str(err))
         except Exception as err:  # most often the model server being unreachable
-            logger.exception("ask failed for document %s", doc_id)
+            logger.exception("ask failed for %s", what)
             # the caller gets the reason without internal addresses; the full error is in the server log
             reason = re.sub(r"https?://\S+", "<url>", str(err))[:200]
             raise HTTPException(502, f"{type(err).__name__}: {reason}")
 
+    @v1.post("/documents/{doc_id}/ask")
+    def ask(doc_id: str, request: AskRequest, owner: str = Depends(current_owner)) -> Dict[str, Any]:
+        return answer_request(request, lambda: svc().ask(doc_id, owner, request.question, request.config, request.style),
+                              f"document {doc_id}")
+
     @v1.post("/ask")
     def ask_across(request: AskAcrossRequest, owner: str = Depends(current_owner)) -> Dict[str, Any]:
-        if request.config not in USABLE_CONFIGS:
-            raise HTTPException(422, f"config must be one of {USABLE_CONFIGS}")
-        if request.style not in ("standard", "spotlight"):
-            raise HTTPException(422, "style must be standard or spotlight")
-        try:
-            return svc().ask_documents(owner, request.doc_ids, request.question, request.config, request.style)
-        except NotFound:
-            raise HTTPException(404, "no such document")
-        except BadUpload as err:
-            raise HTTPException(409, str(err))
-        except Exception as err:
-            logger.exception("ask across documents failed")
-            reason = re.sub(r"https?://\S+", "<url>", str(err))[:200]
-            raise HTTPException(502, f"{type(err).__name__}: {reason}")
+        return answer_request(
+            request, lambda: svc().ask_documents(owner, request.doc_ids, request.question, request.config, request.style),
+            "several documents")
 
     app.include_router(v1)
     return app

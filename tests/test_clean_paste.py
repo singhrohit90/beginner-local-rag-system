@@ -46,3 +46,12 @@ def test_repair_names_the_escapes_it_removes():
     fixed, changes = repair_text(r'{"a": "x\_y \d+ z"}')
     assert fixed == '{"a": "x_y d+ z"}'
     assert any(r"\_" in c and r"\d" in c for c in changes)
+
+
+def test_an_escaped_backslash_followed_by_a_letter_is_valid_json_and_left_alone():
+    valid = r'{"evidence_terms": ["\\d+ \\w"]}'  # valid JSON for the regex \d+ \w: each backslash is doubled
+    fixed, changes = repair_text(valid)
+    assert fixed == valid and changes == []
+    assert parse_objects(fixed)[0]["evidence_terms"] == [r"\d+ \w"]
+    mixed, notes = repair_text(r'{"a": "\\d and \_"}')  # a real escaped backslash next to a markdown one
+    assert mixed == r'{"a": "\\d and _"}' and notes and r"\_" in notes[0]

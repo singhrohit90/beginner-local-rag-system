@@ -5,6 +5,7 @@ the embedding's fault and not an approximate index's. A real vector database can
 class later without touching the stages that call `search`.
 """
 
+import hashlib
 import json
 import re
 from dataclasses import dataclass, field
@@ -21,6 +22,14 @@ from rag.common.types import Chunk
 def index_dir(chunker: str, embedder_name: str, variant: str = "plain", root: Path = PROCESSED_DIR) -> Path:
     slug = re.sub(r"[^A-Za-z0-9]+", "-", embedder_name).strip("-")
     return root / "index" / f"{chunker}__{slug}__{variant}"
+
+
+def text_fingerprint(texts: Sequence[str]) -> str:
+    digest = hashlib.sha256()
+    for text in texts:
+        digest.update(text.encode("utf-8"))
+        digest.update(b"\x00")  # so ["ab", "c"] and ["a", "bc"] differ
+    return digest.hexdigest()
 
 
 @dataclass
@@ -42,6 +51,7 @@ class VectorIndex:
             raise ValueError("no chunks to index")
         texts = [text_of(c) for c in chunks]
         info: Dict[str, Any] = dict(meta)
+        info["text_sha"] = text_fingerprint(texts)
         count_tokens = getattr(embedder, "count_tokens", None)
         if count_tokens:
             lengths = count_tokens(texts)
@@ -78,6 +88,10 @@ class VectorIndex:
             info["chunk_ids"], np.load(directory / "vectors.npy"), info["embedder"], info["meta"]
         )
 
-    def matches(self, chunks: Sequence[Chunk]) -> bool:
-        """True if this index was built from exactly these chunks, in this order."""
-        return self.chunk_ids == [c.chunk_id for c in chunks]
+    def matches(self, chunks: Sequence[Chunk], text_of: Callable[[Chunk], str] = lambda c: c.text) -> bool:
+        """True if this index was built from exactly these chunks, in this order, with this text.
+        Chunk ids alone are not enough: re-chunking can keep every id and change every boundary. An
+        index saved before the text fingerprint existed cannot be checked, so it is rebuilt once."""
+        if self.chunk_ids != [c.chunk_id for c in chunks]:
+            return False
+        return self.meta.get("text_sha") == text_fingerprint([text_of(c) for c in chunks])

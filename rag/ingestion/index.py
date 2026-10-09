@@ -20,15 +20,15 @@ def get_index(
     """variant "plain" embeds the chunk text; "heading" embeds "section path + text".
     The index is cached under root/index; the default keeps the book's index in data/processed."""
     directory = index_dir(chunkset.strategy, embedder.name, variant, root)
-    if directory.exists() and not rebuild:
-        index = VectorIndex.load(directory)
-        if index.matches(chunkset.chunks):
-            return index
     text_of = (
         (lambda c: f"{c.section}\n{c.text}" if c.section else c.text)
         if variant == "heading"
         else (lambda c: c.text)
     )
+    if directory.exists() and not rebuild:
+        index = VectorIndex.load(directory)
+        if index.matches(chunkset.chunks, text_of):
+            return index
     index = VectorIndex.build(chunkset.chunks, embedder, text_of, variant=variant)
     index.save(directory)
     return index

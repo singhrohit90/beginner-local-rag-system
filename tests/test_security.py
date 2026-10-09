@@ -183,3 +183,13 @@ def test_run_attack_obeyed_blocked_scanned_and_spotlighted(base):
 
     spot = run_attack(doc, 0, "spotlight", pipeline, embedder, FakeLLM(careful), config, {})
     assert spot.outcome == "none" and spot.answered
+
+
+def test_the_output_filter_accepts_a_context_url_followed_by_ordinary_punctuation():
+    from rag.query.guard import filter_output
+
+    context = "Documentation lives at https://example.com/docs for reference."
+    for answer in ["See https://example.com/docs: it explains the setup.", "See **https://example.com/docs** for details.",
+                   "Is it at https://example.com/docs?", "Yes (https://example.com/docs)!"]:
+        assert not filter_output(answer, context).blocked, answer
+    assert filter_output("See https://evil.example/x: it explains.", context).blocked  # a URL not in the context still is

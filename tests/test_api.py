@@ -72,7 +72,7 @@ def test_rejects_non_pdf_and_unknown_or_malicious_ids(tmp_path):
 def test_size_limit_is_enforced(tmp_path):
     client, service = make_client(tmp_path)
     service.max_upload_bytes = 500
-    assert upload(client, make_pdf(REPLICATION)).status_code == 400
+    assert upload(client, make_pdf(REPLICATION)).status_code == 413  # too large is 413, not a generic 400
 
 
 def test_documents_are_isolated_and_deleting_removes_the_folder(tmp_path):
@@ -566,3 +566,34 @@ def test_a_failed_document_says_which_stage_it_failed_in(tmp_path):
     service.run_ingestion(doc_id)
     status = service.get(doc_id, "local")
     assert status["state"] == "failed" and status["stage"] == "extracting"
+
+
+# ---- fixes from the second code review -------------------------------------------------------------
+
+def test_the_same_file_with_another_chunker_is_a_new_document(two_users):
+    client, service, who = two_users
+    pdf = make_pdf(REPLICATION, COMPACTION)
+    first = upload(client, pdf, chunker="recursive")
+    other = upload(client, pdf, chunker="fixed")  # how chunkers are compared: same book, different splitting
+    assert first.status_code == 202 and other.status_code == 202 and other.json()["id"] != first.json()["id"]
+    assert upload(client, pdf, chunker="fixed").status_code == 200  # but the same pair twice is a duplicate
+
+
+def test_an_oversize_upload_is_refused_from_its_declared_size_before_the_body_is_read(tmp_path):
+    from rag.api.service import DEFAULT_MAX_UPLOAD_BYTES
+
+    client, _ = make_client(tmp_path)
+    response = client.post("/v1/documents", content=b"x", headers={
+        "content-length": str(DEFAULT_MAX_UPLOAD_BYTES + 2 * 1024 * 1024), "content-type": "multipart/form-data; boundary=b"})
+    assert response.status_code == 413
+
+
+def test_one_damaged_status_file_does_not_stop_the_service_starting(tmp_path):
+    client, service = make_client(tmp_path)
+    good = upload(client, make_pdf(REPLICATION)).json()["id"]
+    damaged = service.root / "aaaaaaaaaaaa"
+    damaged.mkdir()
+    (damaged / "status.json").write_text('{"state": "queued', encoding="utf-8")  # cut off mid-write
+    restarted = DocumentService(root=tmp_path / "uploads", embedder=HashingEmbedder(), embedder_spec="hash",
+                                llm=FakeLLM(lambda s, u: "x"))
+    assert [d["id"] for d in restarted.list("local")] == [good]  # the damaged one is skipped, not fatal

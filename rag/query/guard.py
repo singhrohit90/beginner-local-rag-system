@@ -101,6 +101,6 @@ def filter_output(answer: str, context_text: str) -> FilterResult:
     if _IMAGE.search(answer):
         reasons.append("external-image")
     context_lower = context_text.lower()
-    if any(url.lower().rstrip(".,;") not in context_lower for url in _URL.findall(answer)):
+    if any(url.lower().rstrip(".,;:!?*_~") not in context_lower for url in _URL.findall(answer)):
         reasons.append("url-not-in-context")
     return FilterResult(BLOCKED if reasons else answer, bool(reasons), reasons)

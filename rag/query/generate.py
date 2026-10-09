@@ -16,8 +16,12 @@ _ABSTAIN_PATTERN = re.compile(
 
 
 def looks_like_abstention(text: str) -> bool:
+    """The exact refusal phrase always counts. The looser wordings count only when the answer cites
+    nothing: "The text does not include the exact figure, but it says X [S2]" is an answer."""
     lowered = text.lower()
-    return ABSTAIN.lower() in lowered or ABSTAIN_DOCUMENT.lower() in lowered or bool(_ABSTAIN_PATTERN.search(text))
+    if ABSTAIN.lower() in lowered or ABSTAIN_DOCUMENT.lower() in lowered:
+        return True
+    return not _CITATION.search(text) and bool(_ABSTAIN_PATTERN.search(text))
 
 
 def parse_citations(text: str, n_passages: int) -> List[int]:

@@ -14,7 +14,9 @@ import re
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
-_BAD_ESCAPE = re.compile(r'\\(?!["\\/bfnrt]|u[0-9a-fA-F]{4})')
+# A pair of backslashes is a valid escaped backslash and is consumed whole, so the second one of "\\d"
+# is never mistaken for the start of a bad escape. Only a lone backslash before an invalid character matches.
+_BAD_ESCAPE = re.compile(r'\\\\|\\(?!["\\/bfnrt]|u[0-9a-fA-F]{4})')
 
 
 # notes is the last key of each object, so its value ends at the first "} that is followed by the
@@ -40,8 +42,10 @@ def _fix_notes(text: str) -> Tuple[str, int]:
 
 def repair_text(text: str) -> Tuple[str, List[str]]:
     changes = []
-    removed = sorted({m.group(0) + (text[m.end()] if m.end() < len(text) else "") for m in _BAD_ESCAPE.finditer(text)})
-    fixed, n = _BAD_ESCAPE.subn("", text)
+    bad = [m for m in _BAD_ESCAPE.finditer(text) if m.group(0) == "\\"]
+    removed = sorted({m.group(0) + (text[m.end()] if m.end() < len(text) else "") for m in bad})
+    n = len(bad)
+    fixed = _BAD_ESCAPE.sub(lambda m: m.group(0) if len(m.group(0)) == 2 else "", text)
     if n:
         # name them: a pattern such as \\d inside evidence text would otherwise change without notice
         changes.append(f"removed {n} invalid backslash escapes, kinds: {', '.join(removed[:8])}")

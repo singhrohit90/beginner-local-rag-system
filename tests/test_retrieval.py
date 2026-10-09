@@ -211,3 +211,20 @@ def test_overlap_is_only_judged_inside_one_document():
     assert [h.chunk_id for h in kept] == ["c0", "c1"]
     b.meta["source"] = "doc-1"  # now they really do overlap
     assert [h.chunk_id for h in select_context(ranked, by_id, {}, ContextConfig(top_k=5))] == ["c0"]
+
+
+def test_a_cached_index_is_rebuilt_when_the_text_changed_even_if_the_chunk_ids_did_not(tmp_path):
+    from rag.ingestion.index import get_index
+
+    embedder = HashingEmbedder()
+    chunks = [make_chunk(0, "alpha beta gamma"), make_chunk(1, "delta epsilon zeta")]
+    chunkset = type("CS", (), {"chunks": chunks, "strategy": "test", "parents": {}, "params": {}})()
+    first = get_index(chunkset, embedder, root=tmp_path)
+    assert first.matches(chunks)
+    changed = [make_chunk(0, "alpha beta gamma"), make_chunk(1, "completely different text now")]  # same ids
+    assert not first.matches(changed)
+    chunkset.chunks = changed
+    rebuilt = get_index(chunkset, embedder, root=tmp_path)
+    assert rebuilt.matches(changed) and not np.allclose(rebuilt.vectors[1], first.vectors[1])
+    legacy = VectorIndex(first.chunk_ids, first.vectors, first.embedder_name, {})  # saved before the fingerprint existed
+    assert not legacy.matches(chunks)

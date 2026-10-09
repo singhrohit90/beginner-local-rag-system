@@ -297,3 +297,10 @@ def test_settings_that_change_answers_are_part_of_the_cache_key(tmp_path):
     CachedLLM(b, tmp_path).generate("s", "u")
     assert len(a.calls) == 1 and len(b.calls) == 1  # the second setting did not reuse the first answer
     assert len(list(tmp_path.glob("*.json"))) == 2
+
+
+def test_a_cited_answer_that_mentions_a_gap_is_not_an_abstention():
+    assert not looks_like_abstention("The text does not include the exact figure, but it says replication lags [S2].")
+    assert not looks_like_abstention("No information on pricing is given, however the design is described in [S1].")
+    assert looks_like_abstention("The text does not include any information about that.")  # nothing cited: a refusal
+    assert looks_like_abstention("I cannot answer this from the provided book. [S1]")  # the exact phrase always counts

@@ -33,6 +33,7 @@ from rag.query.rerank import Reranker
 
 logger = logging.getLogger("rag.api")
 DOC_ID = re.compile(r"^[0-9a-f]{12}$")
+DEFAULT_MAX_UPLOAD_BYTES = 50 * 1024 * 1024
 LOCAL_OWNER = "local"  # the owner until real users arrive, and of any upload made before owners existed
 STATES = ("queued", "processing", "ready", "failed")
 
@@ -45,6 +46,10 @@ class BadUpload(Exception):
     pass
 
 
+class TooLarge(BadUpload):
+    """The file is over the size limit; the API reports it as 413."""
+
+
 class DocumentService:
     def __init__(
         self,
@@ -54,7 +59,7 @@ class DocumentService:
         embedder_spec: str,
         keep_traces: bool = True,
         reranker: Optional[Reranker] = None,
-        max_upload_bytes: int = 50 * 1024 * 1024,
+        max_upload_bytes: int = DEFAULT_MAX_UPLOAD_BYTES,
         store: Optional[ChunkStore] = None,
     ):
         self.root = Path(root)
@@ -122,10 +127,13 @@ class DocumentService:
         for path in self.root.iterdir():
             status_file = path / "status.json"
             if DOC_ID.match(path.name) and status_file.exists():
-                status = self._read_json(status_file)
-                if status.get("state") in ("queued", "processing"):
-                    status.update(state="failed", error="interrupted by a server restart; upload the file again")
-                    self._atomic_write(status_file, json.dumps(status, indent=2))
+                try:
+                    status = self._read_json(status_file)
+                    if status.get("state") in ("queued", "processing"):
+                        status.update(state="failed", error="interrupted by a server restart; upload the file again")
+                        self._atomic_write(status_file, json.dumps(status, indent=2))
+                except (OSError, ValueError):  # one damaged folder must not stop the whole service starting
+                    logger.warning("could not read %s; skipping it", status_file)
 
     def _status(self, doc_id: str) -> Dict[str, Any]:
         """A document's status with no owner check. Internal: background work and recovery use it."""
@@ -153,16 +161,18 @@ class DocumentService:
     def create(self, filename: str, data: bytes, owner: str, chunker: str = "recursive") -> Dict[str, Any]:
         """Validate and store an upload. Ingestion runs separately (run_ingestion)."""
         if len(data) > self.max_upload_bytes:
-            raise BadUpload(f"file is larger than {self.max_upload_bytes // (1024 * 1024)} MB")
+            raise TooLarge(f"file is larger than {self.max_upload_bytes // (1024 * 1024)} MB")
         if not data.startswith(b"%PDF"):  # trust the content, not the extension
             raise BadUpload("not a PDF file")
         digest = hashlib.sha256(data).hexdigest()
         with self._create_lock:
-            # The same file uploaded again by the same owner is the same document. A failed one may be
-            # retried, and another owner's copy is theirs alone. Uploads made before this check existed
-            # have no hash and are not recognised.
+            # The same file with the same chunker uploaded again by the same owner is the same document.
+            # Another chunker is a different document (that is how chunkers are compared), a failed one
+            # may be retried, and another owner's copy is theirs alone. Uploads made before this check
+            # existed have no hash and are not recognised.
             for existing in self.list(owner):
-                if existing.get("sha256") == digest and existing["state"] != "failed":
+                if (existing.get("sha256") == digest and existing.get("chunker") == chunker
+                        and existing["state"] != "failed"):
                     return {**existing, "duplicate": True}
             doc_id = uuid.uuid4().hex[:12]
             directory = self.root / doc_id
