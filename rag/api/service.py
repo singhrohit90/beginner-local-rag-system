@@ -34,6 +34,7 @@ from rag.query.rerank import Reranker
 logger = logging.getLogger("rag.api")
 DOC_ID = re.compile(r"^[0-9a-f]{12}$")
 DEFAULT_MAX_UPLOAD_BYTES = 50 * 1024 * 1024
+DEFAULT_MAX_PAGES = 2000  # the DDIA book is about 600 pages
 LOCAL_OWNER = "local"  # the owner until real users arrive, and of any upload made before owners existed
 STATES = ("queued", "processing", "ready", "failed")
 
@@ -61,6 +62,7 @@ class DocumentService:
         reranker: Optional[Reranker] = None,
         max_upload_bytes: int = DEFAULT_MAX_UPLOAD_BYTES,
         store: Optional[ChunkStore] = None,
+        max_pages: int = DEFAULT_MAX_PAGES,
     ):
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
@@ -70,6 +72,7 @@ class DocumentService:
         self.reranker = reranker
         self.keep_traces = keep_traces  # one JSON file per question, inside the document's folder
         self.max_upload_bytes = max_upload_bytes
+        self.max_pages = max_pages
         self._ingest_lock = threading.Lock()  # one ingestion at a time: the embedder shares the GPU
         self._status_lock = threading.Lock()  # one status.json writer at a time
         self._load_lock = threading.Lock()  # a document is loaded into the store once
@@ -164,6 +167,10 @@ class DocumentService:
             raise TooLarge(f"file is larger than {self.max_upload_bytes // (1024 * 1024)} MB")
         if not data.startswith(b"%PDF"):  # trust the content, not the extension
             raise BadUpload("not a PDF file")
+        # The size limit counts compressed bytes, and a small PDF can expand to a huge number of pages
+        # or large page streams, so the page count is limited too.
+        if self._page_count(data) > self.max_pages:
+            raise TooLarge(f"the PDF has more than {self.max_pages} pages")
         digest = hashlib.sha256(data).hexdigest()
         with self._create_lock:
             # The same file with the same chunker uploaded again by the same owner is the same document.
@@ -206,8 +213,7 @@ class DocumentService:
         except Exception as err:  # the status carries the reason; the server keeps running
             logger.exception("ingestion of %s failed", doc_id)  # the full traceback stays in the server log
             try:
-                self._write_status(doc_id, state="failed",
-                                   error=f"{type(err).__name__}: {str(err) or 'no details, see the server log'}")
+                self._write_status(doc_id, state="failed", error=self._public_error(err))
             except NotFound:
                 pass
         finally:
@@ -216,6 +222,26 @@ class DocumentService:
                 self._remove_tree(self.root / doc_id)
                 self.store.delete_document(doc_id)
                 self._deleting.discard(doc_id)
+
+    @staticmethod
+    def _public_error(err: Exception) -> str:
+        """The reason shown to the owner. File paths and URLs inside an error message describe the
+        server, so they are replaced; the full text stays in the server log."""
+        text = str(err) or "no details, see the server log"
+        text = re.sub(r"https?://\S+", "<url>", text)
+        text = re.sub(r"(?:[A-Za-z]:)?[\\/](?:[^\s\\/'\"]+[\\/])+[^\s\\/'\"]*", "<path>", text)
+        return f"{type(err).__name__}: {text[:300]}"
+
+    @staticmethod
+    def _page_count(data: bytes) -> int:
+        """Pages in the PDF, read from its page tree without decoding any page."""
+        import pymupdf
+
+        try:
+            with pymupdf.open(stream=data, filetype="pdf") as doc:
+                return doc.page_count
+        except Exception as err:
+            raise BadUpload("the PDF could not be opened (damaged or encrypted)") from err
 
     @staticmethod
     def _remove_tree(path: Path) -> None:

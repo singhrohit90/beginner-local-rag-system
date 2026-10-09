@@ -87,12 +87,24 @@ def test_documents_are_isolated_and_deleting_removes_the_folder(tmp_path):
     assert client.get(f"/v1/documents/{a}").status_code == 404
 
 
-def test_a_broken_pdf_fails_cleanly_and_cannot_be_asked(tmp_path):
-    client, _ = make_client(tmp_path)
-    doc_id = upload(client, b"%PDF-1.4 this is not really a pdf").json()["id"]
-    status = client.get(f"/v1/documents/{doc_id}").json()
-    assert status["state"] == "failed" and status["error"]
-    assert client.post(f"/v1/documents/{doc_id}/ask", json={"question": "anything"}).status_code == 409
+def test_a_broken_pdf_is_refused_at_upload(tmp_path):
+    client, service = make_client(tmp_path)
+    assert upload(client, b"%PDF-1.4 this is not really a pdf").status_code == 400
+    assert service.list("local") == []  # nothing was stored
+
+
+def test_page_limit_is_enforced(tmp_path):
+    client, service = make_client(tmp_path)
+    service.max_pages = 1  # the size limit counts compressed bytes, so pages are limited as well
+    assert upload(client, make_pdf(REPLICATION, COMPACTION)).status_code == 413
+    assert upload(client, make_pdf(REPLICATION)).status_code == 202
+
+
+def test_failure_reasons_do_not_show_server_paths_or_urls(tmp_path):
+    err = FileNotFoundError("C:\\Rohit_C\\secret\\x\\source.pdf via http://10.0.0.5:9200/idx and /home/me/app/a.py")
+    text = DocumentService._public_error(err)
+    assert "Rohit_C" not in text and "10.0.0.5" not in text and "/home/me" not in text
+    assert text.startswith("FileNotFoundError:")
 
 
 def test_model_failure_is_reported_as_502(tmp_path):
@@ -562,7 +574,8 @@ def test_the_status_shows_the_stage_while_a_document_is_being_indexed(tmp_path):
 def test_a_failed_document_says_which_stage_it_failed_in(tmp_path):
     service = DocumentService(root=tmp_path / "uploads", embedder=HashingEmbedder(), embedder_spec="hash",
                               llm=FakeLLM(lambda s, u: "x"))
-    doc_id = service.create("bad.pdf", b"%PDF-1.4 this is not really a pdf", "local")["id"]
+    doc_id = service.create("bad.pdf", make_pdf(REPLICATION), "local")["id"]
+    (tmp_path / "uploads" / doc_id / "source.pdf").write_bytes(b"%PDF-1.4 damaged after the upload")
     service.run_ingestion(doc_id)
     status = service.get(doc_id, "local")
     assert status["state"] == "failed" and status["stage"] == "extracting"

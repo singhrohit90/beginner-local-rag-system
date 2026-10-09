@@ -193,3 +193,13 @@ def test_the_output_filter_accepts_a_context_url_followed_by_ordinary_punctuatio
                    "Is it at https://example.com/docs?", "Yes (https://example.com/docs)!"]:
         assert not filter_output(answer, context).blocked, answer
     assert filter_output("See https://evil.example/x: it explains.", context).blocked  # a URL not in the context still is
+
+
+def test_the_output_filter_catches_links_a_renderer_would_still_follow():
+    from rag.query.guard import filter_output
+
+    context = "Documentation lives at https://example.com/docs for reference."
+    for answer in ["![x](//evil.example/p.png?d=1)", "![x][r]\n\n[r]: //evil.example/p.png",
+                   "<img src=//evil.example/p.png>", "[click](ftp://evil.example/x)", "[c](javascript:alert(1))"]:
+        assert filter_output(answer, context).blocked, answer
+    assert not filter_output("Use a // comment, and see https://example.com/docs.", context).blocked
