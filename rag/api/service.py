@@ -228,8 +228,9 @@ class DocumentService:
         """The reason shown to the owner. File paths and URLs inside an error message describe the
         server, so they are replaced; the full text stays in the server log."""
         text = str(err) or "no details, see the server log"
-        text = re.sub(r"https?://\S+", "<url>", text)
-        text = re.sub(r"(?:[A-Za-z]:)?[\\/](?:[^\s\\/'\"]+[\\/])+[^\s\\/'\"]*", "<path>", text)
+        text = re.sub(r"[A-Za-z][A-Za-z0-9+.-]*://\S+", "<url>", text)
+        text = re.sub(r"[A-Za-z]:[\\/][^'\"\r\n]*", "<path>", text)  # a Windows path, which may hold spaces
+        text = re.sub(r"\S*[\\/]\S*", "<path>", text)  # any other word with a separator in it
         return f"{type(err).__name__}: {text[:300]}"
 
     @staticmethod

@@ -11,6 +11,7 @@ filter_output             a post-generation check that withholds answers showing
 The attack side (poisoned documents, the baseline prompt, spotlighting) is in rag/security.
 """
 
+import html
 import re
 from dataclasses import dataclass
 from typing import Dict, List, Sequence
@@ -102,15 +103,29 @@ class FilterResult:
     reasons: List[str]
 
 
+_INVISIBLE = re.compile("[​-‏⁠﻿­]")
+
+
+def _as_a_renderer_reads_it(text: str) -> str:
+    """Markdown and HTML renderers decode entities (&#104;ttps://) and ignore invisible characters
+    before they follow a link, so the checks look at the text in that form too."""
+    for _ in range(2):
+        text = html.unescape(text)
+    return _INVISIBLE.sub("", text)
+
+
 def filter_output(answer: str, context_text: str) -> FilterResult:
     reasons: List[str] = []
-    if CANARY.lower() in answer.lower():
+    # check the text as written and as a renderer would read it
+    seen = [answer, _as_a_renderer_reads_it(answer)]
+    if any(CANARY.lower() in text.lower() for text in seen):
         reasons.append("canary")
-    if any(phrase.lower() in answer.lower() for phrase in _PROMPT_ECHO):
+    if any(phrase.lower() in text.lower() for text in seen for phrase in _PROMPT_ECHO):
         reasons.append("system-prompt-echo")
-    if _IMAGE.search(answer):
+    if any(_IMAGE.search(text) for text in seen):
         reasons.append("external-image")
     context_lower = context_text.lower()
-    if any(url.lower().rstrip(".,;:!?*_~") not in context_lower for url in _URL.findall(answer)):
+    urls = [url for text in seen for url in _URL.findall(text)]
+    if any(url.lower().rstrip(".,;:!?*_~") not in context_lower for url in urls):
         reasons.append("url-not-in-context")
     return FilterResult(BLOCKED if reasons else answer, bool(reasons), reasons)

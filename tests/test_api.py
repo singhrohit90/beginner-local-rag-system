@@ -610,3 +610,12 @@ def test_one_damaged_status_file_does_not_stop_the_service_starting(tmp_path):
     restarted = DocumentService(root=tmp_path / "uploads", embedder=HashingEmbedder(), embedder_spec="hash",
                                 llm=FakeLLM(lambda s, u: "x"))
     assert [d["id"] for d in restarted.list("local")] == [good]  # the damaged one is skipped, not fatal
+
+
+def test_failure_reasons_hide_paths_with_spaces_and_relative_paths(tmp_path):
+    back = chr(92)
+    for message in ["C:" + back + "Users" + back + "John Smith" + back + "app data" + back + "x.pdf",
+                    "No such file: 'data/uploads/ab12/source.pdf'", "file:///C:/x/y.pdf failed",
+                    "cannot open /var/lib/my app/idx"]:
+        text = DocumentService._public_error(OSError(message))
+        assert not any(bit in text for bit in ("Smith", "uploads", "C:/", "/var", "app/idx", "data")), text
