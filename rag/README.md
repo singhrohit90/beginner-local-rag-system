@@ -244,7 +244,10 @@ restart. `RAG_STORE=opensearch` keeps text, vectors and keyword index in the dat
 restart without re-reading any file. Both implement `ChunkStore`, and `tests/test_chunk_store.py` runs
 the same checks against each (the OpenSearch ones are skipped when the database is not running).
 
-Every search filters on owner and document ids inside the query. Dense search is exact by default
+Each owner has indexes of their own (`rag_c_*` for searchable chunks, `rag_p_*` for parent chunks, one
+documents index per embedding model), because Lucene's keyword scoring is computed over every row in an
+index: in a shared index one user's uploads would change another user's ranking. Every search also filters
+on owner and document ids inside the query. Dense search is exact by default
 (scores every vector in scope, same ranking as the in-memory store); `OpenSearchChunkStore(exact=False)`
 uses HNSW. The score returned is the plain cosine similarity. Keyword search uses OpenSearch's BM25 with
 its `english` analyzer, which is not identical to the in-memory BM25, so check retrieval quality on the
@@ -264,9 +267,9 @@ Dense results are identical on every chunker, so the vector side is a faithful r
 search is better in OpenSearch for every chunker, which is a difference in the search, not a bug: our
 in-memory BM25 does no stemming and OpenSearch's `english` analyzer does (that cause is likely but not
 tested). The best hybrid cell is unchanged or better except semantic + weighted, 0.865 to 0.838, one
-question. One question is 2.7 points, so differences of a few points are noise. Latency is 0.2 to 1.0
-seconds per question including evaluation work, against 0.02 to 0.2 in memory; exact scoring plus
-returning vectors for the cosine costs that at this size. Approximate (HNSW) search was not measured.
+question. One question is 2.7 points, so differences of a few points are noise. Latency is 0.1 to 0.5
+seconds per question including evaluation work, against 0.02 to 0.2 in memory (measured again after the
+per-owner indexes and after the cosine was recovered from OpenSearch's score instead of fetching vectors). Approximate (HNSW) search was not measured.
 
 Answer quality through OpenSearch (`python -m rag.experiments.answer --store opensearch`, gpt-oss-20b,
 semantic + weighted), against the in-memory run: correct 0.722 against 0.750, faithful 0.865 against

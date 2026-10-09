@@ -61,6 +61,7 @@ class RetrievalPipeline:
     def run(self, query_id: str, question: str, config: RetrievalConfig) -> Trace:
         store, scope = self.store, self.scope
         info = store.describe(scope)
+        doc_ids = info.pop("doc_ids", [])  # one call answers which chunker and how many documents
         trace = Trace(
             query_id=query_id,
             question=question,
@@ -118,7 +119,7 @@ class RetrievalPipeline:
         parents = store.get_parents(parent_ids, scope) if parent_ids and config.use_parents else {}
         # With one document in scope there is nothing to flood, so the per-source cap would only
         # cut a legitimate document down to a few passages.
-        single_document = len(store.document_ids(scope)) == 1
+        single_document = len(doc_ids) == 1
         skipped: List[Tuple[str, List[str]]] = []
         context = select_context(
             hits(merged),

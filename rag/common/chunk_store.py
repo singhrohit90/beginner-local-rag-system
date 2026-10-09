@@ -6,7 +6,8 @@ can be swapped for a vector database without touching the pipeline. Ingestion wr
 
 Every read takes a Scope. The owner is required and the filter is applied inside the store, so a
 caller cannot forget it and one user's chunks never reach another user's results.
-Chunk ids must be unique across the whole store; the store refuses a document that reuses one.
+Chunk ids must be unique among one owner's documents; a store refuses a document that reuses one.
+(The in-memory store is stricter and wants them unique everywhere.)
 """
 
 import threading
@@ -50,7 +51,10 @@ class ChunkStore(Protocol):
 
     def document_ids(self, scope: Scope) -> List[str]: ...
 
-    def describe(self, scope: Scope) -> Dict[str, Any]: ...
+    def describe(self, scope: Scope) -> Dict[str, Any]:
+        """The chunker info shared by the documents in scope (or chunker "mixed"), plus "doc_ids":
+        the ids of those documents, so one call tells the pipeline both."""
+        ...
 
     def has_document(self, doc_id: str) -> bool: ...
 
@@ -105,6 +109,9 @@ class MemoryChunkStore:
         index = VectorIndex(incoming, np.asarray(vectors), embedder_name, {})
         with self._lock:
             # check everything before touching the old copy, so a failed upsert loses nothing
+            existing = self._docs.get(doc_id)
+            if existing is not None and existing.owner != owner:
+                raise ValueError(f"document {doc_id!r} belongs to another owner")
             for cid in incoming:
                 if self._doc_of_chunk.get(cid, doc_id) != doc_id:
                     raise ValueError(f"chunk id {cid!r} already belongs to another document")
@@ -141,9 +148,9 @@ class MemoryChunkStore:
     def describe(self, scope: Scope) -> Dict[str, Any]:
         with self._lock:
             infos = [self._docs[d].info for d in self.document_ids(scope)]
-        if infos and all(i == infos[0] for i in infos):
-            return dict(infos[0])
-        return {"chunker": "mixed" if infos else None}
+        described = dict(infos[0]) if infos and all(i == infos[0] for i in infos) else {"chunker": "mixed" if infos else None}
+        described["doc_ids"] = self.document_ids(scope)
+        return described
 
     def search_dense(self, vector: np.ndarray, k: int, scope: Scope) -> Scored:
         found: Scored = []

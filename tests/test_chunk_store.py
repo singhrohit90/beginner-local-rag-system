@@ -190,3 +190,51 @@ def test_searching_while_documents_are_added_and_removed_does_not_fail(store):
     for t in threads:
         t.join()
     assert errors == []
+
+
+def test_one_owners_data_never_changes_what_another_owner_searches(store):
+    fill(store)
+    before = [(c.chunk_id, round(s, 6)) for c, s in store.search_keyword("replication", 10, Scope("alice"))]
+    assert before
+    for i in range(30):  # bob uploads a lot of text full of alice's search term
+        store.upsert(f"bulk{i}", "bob", [chunk(f"bulk{i}-0", "replication replication replication replication nodes")],
+                     np.stack([vec(1, 0, 0.5)]), "m", info={"chunker": "test"})
+    after = [(c.chunk_id, round(s, 6)) for c, s in store.search_keyword("replication", 10, Scope("alice"))]
+    assert after == before  # same ranking AND the same scores: no shared statistics leak across owners
+
+
+def test_describe_lists_the_documents_in_scope(store):
+    fill(store)
+    assert store.describe(Scope("alice"))["doc_ids"] == ["d1", "d2"]
+    assert store.describe(Scope("alice", ("d2",)))["doc_ids"] == ["d2"]
+    assert store.describe(Scope("nobody"))["doc_ids"] == []
+
+
+def test_a_document_id_cannot_be_taken_over_by_another_owner(store):
+    fill(store)
+    with pytest.raises((ValueError, Exception), match="another owner|already belongs"):
+        store.upsert("d1", "bob", [chunk("zz1", "stolen")], np.stack([vec(1)]), "m")
+    assert ids(store.search_keyword("compaction", 5, Scope("alice"))) == ["a2"]
+
+
+def test_a_changed_embedding_model_makes_documents_absent_not_empty(store):
+    if not hasattr(store, "_embedder_name"):
+        pytest.skip("only a database store keeps data across a change of embedding model")
+    from rag.common.opensearch_store import OpenSearchChunkStore
+
+    fill(store)
+    other = OpenSearchChunkStore("another-model", DIM, url=OPENSEARCH_URL, prefix=store._prefix)
+    try:
+        assert not other.has_document("d1")  # so the service indexes it again instead of finding no chunks
+        assert other.search_keyword("replication", 5, Scope("alice")) == []
+    finally:
+        pass  # indexes share the fixture's prefix and are dropped with it
+
+
+def test_dense_scores_are_the_plain_cosine_similarity(store):
+    fill(store)
+    results = store.search_dense(vec(1, 0), 10, Scope("alice"))
+    scores = {c.chunk_id: s for c, s in results}
+    expected = {"a1": 1.0, "a2": 0.0, "b1": float(vec(1, 0.1) @ vec(1, 0))}
+    for cid, cosine in expected.items():
+        assert scores[cid] == pytest.approx(cosine, abs=1e-5), cid  # not OpenSearch's 1+cos or (1+cos)/2
