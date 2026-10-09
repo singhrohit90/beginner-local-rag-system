@@ -247,6 +247,24 @@ uses HNSW. The score returned is the plain cosine similarity. Keyword search use
 its `english` analyzer, which is not identical to the in-memory BM25, so check retrieval quality on the
 golden set before relying on it (the next stage).
 
+Parity on the book (37 answerable questions, all five chunkers, four retrieval configs, exact dense
+search; `python -m rag.experiments.retrieval --store opensearch`, compared with the default in-memory run):
+
+| Config | Mean hit@5 change | Range | Mean MRR change | Latency |
+|--------|------------------|-------|-----------------|---------|
+| dense | 0.0 pts | 0.0 to 0.0 | 0.000 | about 7x slower |
+| bm25 | +8.1 pts | +5.4 to +10.8 | +0.070 | about 11x slower |
+| rrf | +3.8 pts | 0.0 to +13.5 | +0.041 | about 6x slower |
+| weighted | +2.2 pts | -2.7 to +8.1 | +0.002 | about 6x slower |
+
+Dense results are identical on every chunker, so the vector side is a faithful replacement. Keyword
+search is better in OpenSearch for every chunker, which is a difference in the search, not a bug: our
+in-memory BM25 does no stemming and OpenSearch's `english` analyzer does (that cause is likely but not
+tested). The best hybrid cell is unchanged or better except semantic + weighted, 0.865 to 0.838, one
+question. One question is 2.7 points, so differences of a few points are noise. Latency is 0.2 to 1.0
+seconds per question including evaluation work, against 0.02 to 0.2 in memory; exact scoring plus
+returning vectors for the cosine costs that at this size. Approximate (HNSW) search was not measured.
+
 The compose file turns the security plugin off, which is only acceptable because the port is published
 on 127.0.0.1. Stop it with `docker compose down` (add `-v` to delete the stored data).
 From this Windows machine the repository folder is not visible inside WSL, so start it with

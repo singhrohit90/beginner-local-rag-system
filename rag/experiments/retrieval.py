@@ -18,6 +18,7 @@ Each (chunker, config) writes traces and a report to runs/<prefix><chunker>__<co
 
 import argparse
 import logging
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -27,7 +28,8 @@ from rag.common.embed import get_embedder
 from rag.observe.golden import load_golden
 from rag.observe.retrieval_quality.run_eval import run_eval
 from rag.common.log import setup_logging
-from rag.ingestion.index import get_index
+from rag.common.chunk_store import Scope
+from rag.ingestion.index import get_index, index_document
 from rag.query.configs import CONFIGS
 from rag.query.pipeline import RetrievalPipeline
 from rag.query.rerank import CrossEncoderReranker, Reranker
@@ -57,13 +59,13 @@ def summarise(report: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def print_table(rows: List[Dict[str, Any]]) -> None:
-    head = f"{'chunker':<14}{'config':<14}{'hit@1':>7}{'hit@5':>7}{'rec@5':>7}{'mrr':>7}{'ndcg@5':>8}{'cand@30':>9}  failures"
+    head = f"{'chunker':<14}{'config':<14}{'hit@1':>7}{'hit@5':>7}{'rec@5':>7}{'mrr':>7}{'ndcg@5':>8}{'cand@30':>9}{'ms/q':>7}  failures"
     print(head)
     for r in rows:
         f = ", ".join(f"{k}:{v}" for k, v in sorted(r["failures"].items()))
         print(
             f"{r['chunker']:<14}{r['config']:<14}{r['hit@1']:>7.3f}{r['hit@5']:>7.3f}"
-            f"{r['recall@5']:>7.3f}{r['mrr']:>7.3f}{r['ndcg@5']:>8.3f}{r['cand@30']:>9.3f}  {f}"
+            f"{r['recall@5']:>7.3f}{r['mrr']:>7.3f}{r['ndcg@5']:>8.3f}{r['cand@30']:>9.3f}{r['ms/q']:>7.0f}  {f}"
         )
 
 
@@ -78,6 +80,10 @@ def main() -> None:
     parser.add_argument("--variant", choices=["plain", "heading"], default="plain",
                         help="heading: embed 'section path + text' instead of text alone")
     parser.add_argument("--rebuild", action="store_true", help="re-embed even if an index exists")
+    parser.add_argument("--store", choices=["memory", "opensearch"], default="memory",
+                        help="where the chunks live while searching; opensearch needs `docker compose up -d opensearch`")
+    parser.add_argument("--opensearch-url", default="http://127.0.0.1:9200")
+    parser.add_argument("--opensearch-prefix", default="ragbook", help="index prefix for the book, apart from uploads")
     parser.add_argument("--page-level", action="store_true",
                         help="count a hit when it overlaps the gold pages, even without the evidence text")
     args = parser.parse_args()
@@ -90,6 +96,13 @@ def main() -> None:
     if any(c.rerank for c in configs):
         reranker = CrossEncoderReranker()
 
+    database = None
+    if args.store == "opensearch":
+        from rag.common.opensearch_store import OpenSearchChunkStore
+
+        database = OpenSearchChunkStore(embedder.name, embedder.dim, url=args.opensearch_url,
+                                        prefix=args.opensearch_prefix)
+
     rows: List[Dict[str, Any]] = []
     for name in [c.strip() for c in args.chunkers.split(",")]:
         chunkset = load_chunkset(args.chunks_dir, name)
@@ -99,8 +112,13 @@ def main() -> None:
                 "%s: median %d tokens, %.1f%% of chunks exceed the model limit of %d (tail not embedded)",
                 name, index.meta["median_tokens"], index.meta["truncated_pct"], index.meta["max_tokens"],
             )
-        pipeline = RetrievalPipeline.from_chunkset(chunkset, index, embedder, reranker)
+        if database is None:
+            pipeline = RetrievalPipeline.from_chunkset(chunkset, index, embedder, reranker)
+        else:  # one document per chunking strategy, so a search only sees that strategy's chunks
+            index_document(database, name, "local", chunkset, index)
+            pipeline = RetrievalPipeline(database, embedder, Scope("local", (name,)), reranker)
         for config in configs:
+            started = time.perf_counter()
             report = run_eval(
                 questions,
                 lambda q, c=config: pipeline.run(q.id, q.question, c),
@@ -108,7 +126,8 @@ def main() -> None:
                 ks=KS,
                 strict=not args.page_level,
             )
-            rows.append({"chunker": name, "config": config.name, **summarise(report)})
+            ms = 1000 * (time.perf_counter() - started) / max(1, len(questions))
+            rows.append({"chunker": name, "config": config.name, "ms/q": ms, **summarise(report)})
     print()
     print_table(rows)
 
