@@ -32,6 +32,6 @@ Keep `data/uploads/<doc_id>/` flat and record `owner` in `status.json`. Do not n
 
 ## Order
 1. Host and Origin checks (small, useful now).
-2. Owner field on documents and the ownership check in the service (works without Keycloak, using a fixed test user).
+2. Owner field on documents and the ownership check in the service (works without Keycloak, using a fixed test user). **Done:** `status.json` has `owner`, every service method takes it, another owner's document is a 404, and the owner filter runs inside the store's search; `current_owner` in `rag/api/main.py` is the single place Keycloak will plug in.
 3. Keycloak token validation and the login redirect.
 4. Owner filter in the vector database query.

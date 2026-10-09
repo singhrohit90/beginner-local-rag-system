@@ -121,7 +121,7 @@ async function refresh() {
   for (const d of docs) {
     const node = el("div", { class: "doc" + (selected === d.id ? " sel" : "") },
       el("div", {}, d.name),
-      el("small", { class: "state-" + d.state }, d.state),
+      el("small", { class: "state-" + d.state }, d.state === "processing" && d.stage ? "processing: " + d.stage : d.state === "failed" && d.stage ? "failed while " + d.stage : d.state),
       el("small", {}, d.state === "ready" ? ` · ${d.chunks} chunks · ${d.chunker}` + (d.flagged_chunks ? ` · ${d.flagged_chunks} flagged` : "") : ""),
       el("small", {}, d.error ? " · " + d.error : ""));
     node.onclick = () => select(d.id);

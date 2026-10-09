@@ -9,14 +9,15 @@ Open items that are not built yet, with the reason each matters. Newest first in
   - a streaming call in `rag/common/llm.py` (`OpenAICompatLLM` waits for the whole reply today); the reasoning model sends its thinking separately, which must not be shown;
   - a decision about the output guard: `filter_output` judges the whole answer and can withhold it, which conflicts with showing words as they arrive (options: buffer until the check passes, or stream and retract);
   - citations are parsed at the end, so the page would link them when the stream finishes;
-  - upload progress is cheaper to add first: report the stage (extract, chunk, embed, index) in `status.json` so the page can show it while it polls.
-- **Duplicate uploads.** The same PDF uploaded twice becomes two documents. Detect by content hash, or accept a caller-supplied `external_id` (needed for a scraper, see `docs/auth_plan.md`).
+  - upload progress, the cheaper half, is already done (see below).
+- **Duplicate uploads: done** for new uploads (same owner, same sha256 returns the existing document). Still open: uploads made before the hash existed are not recognised, and a caller-supplied `external_id` for a scraper (see `docs/auth_plan.md`).
 - **Readable folder names.** Folders are a random id (`data/uploads/<id>/`); only the UI shows the real name.
-- **Chat across several documents.** Today one selected document at a time. Needs the owner field and a scope over all of a user's documents (stage 4).
+- **Chat across several documents: done** (`POST /v1/ask`, one, several or all of the caller's documents). Cross-document questions are not saved as traces; decide how to keep them with a retention rule (see Security).
+- **Upload progress: done** as a stage name (extracting, chunking, embedding) in `status.json` shown on the page. A percentage inside the embedding stage is not built.
 
 ## Security (see `docs/auth_plan.md`, `docs/mcp_risks.md`)
 
-- Owner on every document and chunk, checked on every call, with tests that user A cannot see user B's chunks through any endpoint.
+- Owner on every document and chunk is **done** and tested against both stores (a second user gets 404 for everything of the first user's, and never receives their passages). Still open: the owner comes from one placeholder function, `current_owner` in `rag/api/main.py`, that returns the single local user until Keycloak replaces it.
 - Keycloak token validation; per-client identities for the page, a scraper and an MCP server.
 - Retention for traces in `data/uploads/<id>/chat/` of documents that are not deleted.
 

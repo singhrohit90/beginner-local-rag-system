@@ -14,7 +14,7 @@ import json
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from rag.common.config import PROCESSED_DIR
 from rag.common.embed import Embedder, get_embedder
@@ -42,11 +42,14 @@ def ingest(
     out_dir: Path = PROCESSED_DIR,
     force: bool = False,
     embedder: Optional[Embedder] = None,  # pass one in to reuse a loaded model (the API does)
+    on_stage: Optional[Callable[[str], None]] = None,  # told "extracting", "chunking", "embedding" as each starts
 ) -> IngestResult:
     pages_path = out_dir / f"{pdf.stem}.pages.jsonl"
     toc_path = out_dir / f"{pdf.stem}.toc.json"
     embedder = embedder or get_embedder(embedder_spec)
+    stage = on_stage or (lambda name: None)
 
+    stage("extracting")
     if force or not pages_path.exists():
         logger.info("step 1 extract: %s", pdf)
         save_pages(extract_pages(pdf), pages_path)
@@ -55,6 +58,7 @@ def ingest(
         logger.info("step 1 extract: reusing %s", pages_path)
 
     chunks_dir = out_dir / "chunks"
+    stage("chunking")
     if force or not (chunks_dir / f"{chunker}.jsonl").exists():
         logger.info("step 2 chunk: %s", chunker)
         document = Document.from_files(pages_path, toc_path)
@@ -66,6 +70,7 @@ def ingest(
 
     if not chunkset.chunks:
         raise ValueError("no text could be extracted from this PDF (it may be scanned images; OCR is not supported yet)")
+    stage("embedding")
     logger.info("step 3 index: %d chunks", len(chunkset.chunks))
     index = get_index(chunkset, embedder, "plain", rebuild=force, root=out_dir)
     return IngestResult(chunkset, index)

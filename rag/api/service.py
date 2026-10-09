@@ -172,7 +172,7 @@ class DocumentService:
             label = re.sub(r"[^\w .()\-]", "_", Path(filename).name)[:120] or "document.pdf"
             return self._write_status(
                 doc_id, id=doc_id, name=label, owner=owner, sha256=digest, chunker=chunker, state="queued",
-                error=None, chunks=0, flagged_chunks=0, created=time.time(),
+                stage=None, error=None, chunks=0, flagged_chunks=0, created=time.time(),
             )
 
     def run_ingestion(self, doc_id: str) -> None:
@@ -183,10 +183,13 @@ class DocumentService:
             with self._ingest_lock:
                 self._write_status(doc_id, state="processing")
                 # ingest names its outputs after the PDF file, so the stored name is fixed
+                # on_stage keeps status.json current; if the document is deleted meanwhile it raises
+                # NotFound, which stops the ingestion here
                 result = ingest(directory / "source.pdf", status["chunker"], self.embedder_spec,
-                                out_dir=directory, embedder=self.embedder)
+                                out_dir=directory, embedder=self.embedder,
+                                on_stage=lambda name: self._write_status(doc_id, stage=name))
             flagged = sum(r.flagged for r in scan_chunks(result.chunkset.chunks).values())
-            self._write_status(doc_id, state="ready", chunks=len(result.chunkset.chunks),
+            self._write_status(doc_id, state="ready", stage=None, chunks=len(result.chunkset.chunks),
                                flagged_chunks=flagged)
         except NotFound:
             pass  # deleted before or during ingestion: nothing left to report to

@@ -526,3 +526,43 @@ def test_a_failed_upload_can_be_tried_again(two_users):
     assert client.get(f"/v1/documents/{first}").json()["state"] == "failed"  # no text in it
     again = upload(client, pdf)
     assert again.status_code == 202 and again.json()["id"] != first
+
+
+# ---- upload progress ------------------------------------------------------------------------------
+
+def test_ingest_reports_each_stage_as_it_starts(tmp_path):
+    from rag.ingestion.pipeline import ingest
+
+    pdf = tmp_path / "book.pdf"
+    pdf.write_bytes(make_pdf(REPLICATION, COMPACTION))
+    stages = []
+    ingest(pdf, "recursive", "hash", out_dir=tmp_path / "out", embedder=HashingEmbedder(), on_stage=stages.append)
+    assert stages == ["extracting", "chunking", "embedding"]
+    ingest(pdf, "recursive", "hash", out_dir=tmp_path / "out", embedder=HashingEmbedder())  # the callback is optional
+
+
+def test_the_status_shows_the_stage_while_a_document_is_being_indexed(tmp_path):
+    seen = {}
+
+    class Watching(HashingEmbedder):
+        def embed_documents(self, texts):
+            seen["during"] = service.get(doc_id, "local")  # the status as a polling page would see it right now
+            return super().embed_documents(texts)
+
+    service = DocumentService(root=tmp_path / "uploads", embedder=Watching(), embedder_spec="hash",
+                              llm=FakeLLM(lambda s, u: "x"))
+    doc_id = service.create("book.pdf", make_pdf(REPLICATION), "local")["id"]
+    assert service.get(doc_id, "local")["stage"] is None  # queued: nothing has started
+    service.run_ingestion(doc_id)
+    assert seen["during"]["state"] == "processing" and seen["during"]["stage"] == "embedding"
+    done = service.get(doc_id, "local")
+    assert done["state"] == "ready" and done["stage"] is None
+
+
+def test_a_failed_document_says_which_stage_it_failed_in(tmp_path):
+    service = DocumentService(root=tmp_path / "uploads", embedder=HashingEmbedder(), embedder_spec="hash",
+                              llm=FakeLLM(lambda s, u: "x"))
+    doc_id = service.create("bad.pdf", b"%PDF-1.4 this is not really a pdf", "local")["id"]
+    service.run_ingestion(doc_id)
+    status = service.get(doc_id, "local")
+    assert status["state"] == "failed" and status["stage"] == "extracting"
