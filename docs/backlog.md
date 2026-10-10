@@ -24,7 +24,7 @@ Open items that are not built yet, with the reason each matters. Newest first in
 ## Retrieval and evaluation
 
 - Approximate (HNSW) search in OpenSearch was not measured; only exact search was compared with the in-memory store.
-- OpenSearch keyword search beat our in-memory BM25 by about 8 points on hit@5. Test whether stemming explains it by adding stemming to `rag/common/bm25.py`.
+- [x] OpenSearch keyword search beat our in-memory BM25 by about 8 points on hit@5. Tested: optional stemming in `rag/common/bm25.py` recovers about two thirds of it (+5.4 points) and all of the MRR gain; off by default. See `rag/README.md` Step 9.
 - Citation support and answer relevance checks in `rag/observe/generation_quality/`.
 - Query rewriting and intent classification: only add them if the golden set shows a gain.
 - Documents with images, tables and scans: the `Element` contract and OCR handlers (Stage 4 of the reorganisation plan).

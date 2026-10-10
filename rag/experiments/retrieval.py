@@ -22,6 +22,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from rag.common import bm25
 from rag.ingestion.chunking.base import load_chunkset
 from rag.common.config import GOLDEN_DIR, PROCESSED_DIR
 from rag.common.embed import get_embedder
@@ -84,10 +85,14 @@ def main() -> None:
                         help="where the chunks live while searching; opensearch needs `docker compose up -d opensearch`")
     parser.add_argument("--opensearch-url", default="http://127.0.0.1:9200")
     parser.add_argument("--opensearch-prefix", default="ragbook", help="index prefix for the book, apart from uploads")
+    parser.add_argument("--bm25-stem", action="store_true",
+                        help="stem terms in the in-memory BM25 (off by default; an experiment, see README Step 9)")
     parser.add_argument("--page-level", action="store_true",
                         help="count a hit when it overlaps the gold pages, even without the evidence text")
     args = parser.parse_args()
     setup_logging()
+    if args.bm25_stem:
+        bm25.DEFAULT_STEM = True
 
     questions = load_golden(args.golden)
     embedder = get_embedder(args.embedder)
