@@ -38,7 +38,7 @@ Open items that are not built yet, with the reason each matters. Newest first in
 ## From the code review of the extraction limits (not fixed)
 
 - [x] **Stemming is a global switch.** Done: `MemoryChunkStore(stem=False)` (and `from_chunkset`, `copy`) and `RetrievalPipeline.from_chunkset(..., stem=False)` pass it to every `BM25Index`; `--bm25-stem` sets it on the pipelines it builds, and `DEFAULT_STEM` is gone.
-- **Windows job handles.** `rag/ingestion/sandbox.py` keeps them in a module-level dict (`_JOBS`) and reloads `kernel32` without `argtypes` to close them. A small class that owns the handle would remove both.
+- [x] **Windows job handles.** Done: `_WindowsJob` in `rag/ingestion/sandbox.py` owns the handle (context manager, one `kernel32` setup with `argtypes`); the module-level dict and `_release_job` are gone.
 - **`max_page_chars` bounds the output, not the work.** `page.get_text("dict")` has already built the whole page when the cut is made, and margin blocks use the same budget. The time and memory limits are the real protection.
 - **The sandbox has only run on Windows.** On Linux and macOS the child sets `RLIMIT_AS` itself; if the system refuses, extraction fails with a message that says so. Run its tests on Linux before deploying there.
 

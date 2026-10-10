@@ -14,11 +14,14 @@ Only the Windows path has been run so far; on Linux and macOS the child sets RLI
 if the system refuses, extraction fails with a message that says so instead of running unbounded.
 """
 
+import contextlib
+import ctypes
 import json
 import logging
 import multiprocessing
 import os
 import sys
+from ctypes import wintypes
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -92,75 +95,88 @@ def _child(target: Callable, args: tuple, memory_mb: int, go) -> None:
     target(*args)
 
 
-def _limit_memory_windows(pid: int, memory_mb: int) -> bool:
-    """Put the process in a Job Object with a per-process memory cap. Returns False on failure."""
-    import ctypes
-    from ctypes import wintypes
-
-    class IoCounters(ctypes.Structure):
-        _fields_ = [(n, ctypes.c_ulonglong) for n in (
-            "ReadOps", "WriteOps", "OtherOps", "ReadBytes", "WriteBytes", "OtherBytes")]
-
-    class BasicLimits(ctypes.Structure):
-        _fields_ = [
-            ("PerProcessUserTimeLimit", ctypes.c_longlong), ("PerJobUserTimeLimit", ctypes.c_longlong),
-            ("LimitFlags", wintypes.DWORD), ("MinimumWorkingSetSize", ctypes.c_size_t),
-            ("MaximumWorkingSetSize", ctypes.c_size_t), ("ActiveProcessLimit", wintypes.DWORD),
-            ("Affinity", ctypes.c_size_t), ("PriorityClass", wintypes.DWORD),
-            ("SchedulingClass", wintypes.DWORD),
-        ]
-
-    class ExtendedLimits(ctypes.Structure):
-        _fields_ = [
-            ("Basic", BasicLimits), ("Io", IoCounters), ("ProcessMemoryLimit", ctypes.c_size_t),
-            ("JobMemoryLimit", ctypes.c_size_t), ("PeakProcessMemoryUsed", ctypes.c_size_t),
-            ("PeakJobMemoryUsed", ctypes.c_size_t),
-        ]
-
-    active_process_limit, job_memory_limit, kill_on_close = 0x8, 0x200, 0x2000
-    extended_limit_class = 9
-    set_quota, terminate = 0x0100, 0x0001  # process access rights
-
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-    kernel32.CreateJobObjectW.restype = wintypes.HANDLE
-    kernel32.OpenProcess.restype = wintypes.HANDLE
-    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
-    kernel32.SetInformationJobObject.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD]
-    kernel32.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
-    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
-
-    job = kernel32.CreateJobObjectW(None, None)
-    if not job:
-        return False
-    limits = ExtendedLimits()
-    # A limit on the whole job, and a single process in it: a child that starts more processes
-    # would otherwise get a fresh allowance for each.
-    limits.Basic.LimitFlags = job_memory_limit | active_process_limit | kill_on_close
-    limits.Basic.ActiveProcessLimit = 1
-    limits.JobMemoryLimit = memory_mb * 1024 * 1024
-    handle = kernel32.OpenProcess(set_quota | terminate, False, pid)
-    ok = bool(handle) and bool(kernel32.SetInformationJobObject(
-        job, extended_limit_class, ctypes.byref(limits), ctypes.sizeof(limits))) \
-        and bool(kernel32.AssignProcessToJobObject(job, handle))
-    if handle:
-        kernel32.CloseHandle(handle)
-    # The job handle stays open on purpose: closing it would kill the child (kill_on_close). It
-    # is released when this process exits, or below once the child is done.
-    _JOBS[pid] = job if ok else None
-    if not ok:
-        kernel32.CloseHandle(job)
-    return ok
+class _IoCounters(ctypes.Structure):
+    _fields_ = [(n, ctypes.c_ulonglong) for n in (
+        "ReadOps", "WriteOps", "OtherOps", "ReadBytes", "WriteBytes", "OtherBytes")]
 
 
-_JOBS: dict = {}
+class _BasicLimits(ctypes.Structure):
+    _fields_ = [
+        ("PerProcessUserTimeLimit", ctypes.c_longlong), ("PerJobUserTimeLimit", ctypes.c_longlong),
+        ("LimitFlags", wintypes.DWORD), ("MinimumWorkingSetSize", ctypes.c_size_t),
+        ("MaximumWorkingSetSize", ctypes.c_size_t), ("ActiveProcessLimit", wintypes.DWORD),
+        ("Affinity", ctypes.c_size_t), ("PriorityClass", wintypes.DWORD),
+        ("SchedulingClass", wintypes.DWORD),
+    ]
 
 
-def _release_job(pid: int) -> None:
-    job = _JOBS.pop(pid, None)
-    if job:
-        import ctypes
+class _ExtendedLimits(ctypes.Structure):
+    _fields_ = [
+        ("Basic", _BasicLimits), ("Io", _IoCounters), ("ProcessMemoryLimit", ctypes.c_size_t),
+        ("JobMemoryLimit", ctypes.c_size_t), ("PeakProcessMemoryUsed", ctypes.c_size_t),
+        ("PeakJobMemoryUsed", ctypes.c_size_t),
+    ]
 
-        ctypes.WinDLL("kernel32").CloseHandle(ctypes.c_void_p(job))
+
+def _kernel32():
+    """kernel32 with the argument and result types of every call used here."""
+    k = ctypes.WinDLL("kernel32", use_last_error=True)
+    k.CreateJobObjectW.argtypes = [ctypes.c_void_p, wintypes.LPCWSTR]
+    k.CreateJobObjectW.restype = wintypes.HANDLE
+    k.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    k.OpenProcess.restype = wintypes.HANDLE
+    k.SetInformationJobObject.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD]
+    k.SetInformationJobObject.restype = wintypes.BOOL
+    k.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
+    k.AssignProcessToJobObject.restype = wintypes.BOOL
+    k.CloseHandle.argtypes = [wintypes.HANDLE]
+    k.CloseHandle.restype = wintypes.BOOL
+    return k
+
+
+class _WindowsJob:
+    """A Windows Job Object that owns its handle. Use it as a context manager: the handle is closed
+    on exit, and because the job kills its process when the handle closes, nothing outlives the run."""
+
+    ACTIVE_PROCESS_LIMIT, JOB_MEMORY_LIMIT, KILL_ON_CLOSE = 0x8, 0x200, 0x2000
+    EXTENDED_LIMIT_CLASS = 9
+    SET_QUOTA, TERMINATE = 0x0100, 0x0001  # process access rights
+
+    def __init__(self) -> None:
+        self._k = _kernel32()
+        self._handle = self._k.CreateJobObjectW(None, None) or None  # None: no job, limit() fails
+
+    def limit(self, pid: int, memory_mb: int) -> bool:
+        """Cap the job's memory, allow one process, and put `pid` in it. False on any failure."""
+        if not self._handle:
+            return False
+        limits = _ExtendedLimits()
+        # A limit on the whole job, and a single process in it: a child that starts more processes
+        # would otherwise get a fresh allowance for each.
+        limits.Basic.LimitFlags = self.JOB_MEMORY_LIMIT | self.ACTIVE_PROCESS_LIMIT | self.KILL_ON_CLOSE
+        limits.Basic.ActiveProcessLimit = 1
+        limits.JobMemoryLimit = memory_mb * 1024 * 1024
+        process = self._k.OpenProcess(self.SET_QUOTA | self.TERMINATE, False, pid)
+        if not process:
+            return False
+        try:
+            return bool(self._k.SetInformationJobObject(
+                self._handle, self.EXTENDED_LIMIT_CLASS, ctypes.byref(limits), ctypes.sizeof(limits))) \
+                and bool(self._k.AssignProcessToJobObject(self._handle, process))
+        finally:
+            self._k.CloseHandle(process)
+
+    def close(self) -> None:
+        """Close the handle (kills a process still in the job). Safe to call twice."""
+        handle, self._handle = self._handle, None
+        if handle:
+            self._k.CloseHandle(handle)
+
+    def __enter__(self) -> "_WindowsJob":
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self.close()
 
 
 def run_limited(target: Callable, args: tuple = (), timeout: float = DEFAULT_TIMEOUT_SECONDS,
@@ -170,28 +186,28 @@ def run_limited(target: Callable, args: tuple = (), timeout: float = DEFAULT_TIM
     go = context.Event()
     process = context.Process(target=_child, args=(target, args, memory_mb, go), daemon=True)
     process.start()
-    try:
-        if sys.platform == "win32" and not _limit_memory_windows(process.pid, memory_mb):
-            # no limit means no sandbox: refuse to run the file rather than run it unbounded
-            process.kill()
-            process.join()
-            raise ExtractionLimit("PDF extraction could not be started with a memory limit")
-        go.set()
-        process.join(timeout)
-        if process.is_alive():
-            process.kill()
-            process.join()
-            raise ExtractionLimit(f"PDF extraction took longer than {int(timeout)} seconds and was stopped")
-        if process.exitcode != 0:
-            reason = REASONS.get(process.exitcode)
-            if reason is None:
-                reason = f"the file may be damaged or need more than {memory_mb} MB of memory"
-            raise ExtractionLimit(f"PDF extraction failed (exit code {process.exitcode}); {reason}")
-    finally:
-        if process.is_alive():
-            process.kill()
-        if sys.platform == "win32":
-            _release_job(process.pid)
+    # The job is closed on the way out, also when the run is cancelled.
+    with (_WindowsJob() if sys.platform == "win32" else contextlib.nullcontext()) as job:
+        try:
+            if job is not None and not job.limit(process.pid, memory_mb):
+                # no limit means no sandbox: refuse to run the file rather than run it unbounded
+                process.kill()
+                process.join()
+                raise ExtractionLimit("PDF extraction could not be started with a memory limit")
+            go.set()
+            process.join(timeout)
+            if process.is_alive():
+                process.kill()
+                process.join()
+                raise ExtractionLimit(f"PDF extraction took longer than {int(timeout)} seconds and was stopped")
+            if process.exitcode != 0:
+                reason = REASONS.get(process.exitcode)
+                if reason is None:
+                    reason = f"the file may be damaged or need more than {memory_mb} MB of memory"
+                raise ExtractionLimit(f"PDF extraction failed (exit code {process.exitcode}); {reason}")
+        finally:
+            if process.is_alive():
+                process.kill()
 
 
 def extract_in_sandbox(pdf: Path, pages_path: Path, toc_path: Path,

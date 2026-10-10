@@ -65,7 +65,7 @@ def test_no_memory_limit_means_the_file_is_not_run(monkeypatch):
 
     if sys.platform != "win32":
         pytest.skip("the Windows job object is the only limit set by the parent")
-    monkeypatch.setattr(sandbox, "_limit_memory_windows", lambda pid, mb: False)
+    monkeypatch.setattr(sandbox._WindowsJob, "limit", lambda self, pid, mb: False)
     with pytest.raises(ExtractionLimit, match="memory limit"):
         sandbox.run_limited(sleep_forever, timeout=30, memory_mb=512)
 
@@ -103,12 +103,12 @@ def test_the_child_does_not_start_work_before_its_limits_are_in_place(tmp_path, 
     marker = tmp_path / "started.txt"
     seen = {}
 
-    def slow_limit(pid, memory_mb):
+    def slow_limit(self, pid, memory_mb):
         time.sleep(4)  # more than enough for the child to start and get going if it were not waiting
         seen["early"] = marker.exists()
         return True
 
-    monkeypatch.setattr(sandbox, "_limit_memory_windows", slow_limit)
+    monkeypatch.setattr(sandbox._WindowsJob, "limit", slow_limit)
     sandbox.run_limited(write_marker, (str(marker),), timeout=60, memory_mb=512)
     assert seen["early"] is False and marker.exists()
 
