@@ -26,6 +26,7 @@ from rag.common.chunk_store import ChunkStore, MemoryChunkStore, Scope
 from rag.ingestion.chunking.base import load_chunkset
 from rag.ingestion.index import get_index, index_document
 from rag.ingestion.pipeline import ingest
+from rag.ingestion.sandbox import DEFAULT_MEMORY_MB, DEFAULT_TIMEOUT_SECONDS, extract_in_sandbox
 from rag.query.configs import CONFIGS
 from rag.query.guard import scan_chunks
 from rag.query.pipeline import RagPipeline, RetrievalPipeline
@@ -63,6 +64,8 @@ class DocumentService:
         max_upload_bytes: int = DEFAULT_MAX_UPLOAD_BYTES,
         store: Optional[ChunkStore] = None,
         max_pages: int = DEFAULT_MAX_PAGES,
+        extract_timeout: float = DEFAULT_TIMEOUT_SECONDS,
+        extract_memory_mb: int = DEFAULT_MEMORY_MB,
     ):
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
@@ -73,6 +76,8 @@ class DocumentService:
         self.keep_traces = keep_traces  # one JSON file per question, inside the document's folder
         self.max_upload_bytes = max_upload_bytes
         self.max_pages = max_pages
+        self.extract_timeout = extract_timeout
+        self.extract_memory_mb = extract_memory_mb
         self._ingest_lock = threading.Lock()  # one ingestion at a time: the embedder shares the GPU
         self._status_lock = threading.Lock()  # one status.json writer at a time
         self._load_lock = threading.Lock()  # a document is loaded into the store once
@@ -203,7 +208,7 @@ class DocumentService:
                 # on_stage keeps status.json current; if the document is deleted meanwhile it raises
                 # NotFound, which stops the ingestion here
                 result = ingest(directory / "source.pdf", status["chunker"], self.embedder_spec,
-                                out_dir=directory, embedder=self.embedder,
+                                out_dir=directory, embedder=self.embedder, extractor=self._extract,
                                 on_stage=lambda name: self._write_status(doc_id, stage=name))
             flagged = sum(r.flagged for r in scan_chunks(result.chunkset.chunks).values())
             self._write_status(doc_id, state="ready", stage=None, chunks=len(result.chunkset.chunks),
@@ -222,6 +227,10 @@ class DocumentService:
                 self._remove_tree(self.root / doc_id)
                 self.store.delete_document(doc_id)
                 self._deleting.discard(doc_id)
+
+    def _extract(self, pdf: Path, pages_path: Path, toc_path: Path) -> None:
+        """PDF -> pages in a child process with a time and memory limit (see sandbox.py)."""
+        extract_in_sandbox(pdf, pages_path, toc_path, self.extract_timeout, self.extract_memory_mb)
 
     @staticmethod
     def _public_error(err: Exception) -> str:

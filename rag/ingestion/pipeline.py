@@ -43,6 +43,9 @@ def ingest(
     force: bool = False,
     embedder: Optional[Embedder] = None,  # pass one in to reuse a loaded model (the API does)
     on_stage: Optional[Callable[[str], None]] = None,  # told "extracting", "chunking", "embedding" as each starts
+    # Writes pages_path and toc_path from the PDF. None = extract in this process (CLI, experiments);
+    # the API passes a sandboxed one (rag/ingestion/sandbox.py).
+    extractor: Optional[Callable[[Path, Path, Path], None]] = None,
 ) -> IngestResult:
     pages_path = out_dir / f"{pdf.stem}.pages.jsonl"
     toc_path = out_dir / f"{pdf.stem}.toc.json"
@@ -52,8 +55,11 @@ def ingest(
     stage("extracting")
     if force or not pages_path.exists():
         logger.info("step 1 extract: %s", pdf)
-        save_pages(extract_pages(pdf), pages_path)
-        toc_path.write_text(json.dumps(extract_toc(pdf), indent=1), encoding="utf-8")
+        if extractor:
+            extractor(pdf, pages_path, toc_path)
+        else:
+            save_pages(extract_pages(pdf), pages_path)
+            toc_path.write_text(json.dumps(extract_toc(pdf), indent=1), encoding="utf-8")
     else:
         logger.info("step 1 extract: reusing %s", pages_path)
 
