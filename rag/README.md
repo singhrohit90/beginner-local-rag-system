@@ -265,11 +265,30 @@ search; `python -m rag.experiments.retrieval --store opensearch`, compared with 
 
 Dense results are identical on every chunker, so the vector side is a faithful replacement. Keyword
 search is better in OpenSearch for every chunker, which is a difference in the search, not a bug: our
-in-memory BM25 does no stemming and OpenSearch's `english` analyzer does (that cause is likely but not
-tested). The best hybrid cell is unchanged or better except semantic + weighted, 0.865 to 0.838, one
+in-memory BM25 does no stemming and OpenSearch's `english` analyzer does (tested below). The best hybrid cell is unchanged or better except semantic + weighted, 0.865 to 0.838, one
 question. One question is 2.7 points, so differences of a few points are noise. Latency is 0.1 to 0.5
 seconds per question including evaluation work, against 0.02 to 0.2 in memory (measured again after the
 per-owner indexes and after the cosine was recovered from OpenSearch's score instead of fetching vectors). Approximate (HNSW) search was not measured.
+
+Does stemming explain the keyword gap? `BM25Index(chunks, stem=True)` applies a small dependency-free Porter
+stemmer (`rag/common/stem.py`) to chunks and queries; it is off by default, so every other number here is
+unchanged. Same 37 questions, in memory, no OpenSearch or LLM
+(`python -m rag.experiments.retrieval --chunkers fixed,recursive,semantic,heading,parent_child --configs bm25,rrf,weighted [--bm25-stem]`).
+Mean over the five chunkers:
+
+| Config | hit@5 off | hit@5 stemming | Change | OpenSearch change | MRR off | MRR stemming | OpenSearch MRR change |
+|--------|-----------|----------------|--------|-------------------|---------|--------------|-----------------------|
+| bm25 | 0.741 | 0.795 | +5.4 pts (range -2.7 to +8.1) | +8.1 pts | 0.575 | 0.648 | +0.070 (stemming +0.073) |
+| rrf | 0.779 | 0.806 | +2.7 pts | +3.8 pts | 0.567 | 0.603 | +0.041 (stemming +0.036) |
+| weighted | 0.784 | 0.800 | +1.6 pts | +2.2 pts | 0.589 | 0.577 | +0.002 (stemming -0.011) |
+
+Stemming closes about two thirds of the hit@5 gap for keyword search and all of the MRR gap, and about
+two thirds of the rrf gap, so stemming is very likely the main cause. The remainder (about 2.7 points,
+one question) is inside the noise, so other analyzer differences (stopword list, possessives, tokenizer)
+are neither ruled out nor needed to explain it. Individual cells swing by up to 8 points either way
+(semantic + weighted falls 0.865 to 0.811, heading + weighted rises 0.865 to 0.892), so only the means
+mean anything. Stemming stays off by default: the hybrid configs the system uses do not improve beyond
+noise, and the invariant `--chunkers semantic --configs weighted` (hit@5 0.865, mrr 0.663) holds with it off.
 
 Answer quality through OpenSearch (`python -m rag.experiments.answer --store opensearch`, gpt-oss-20b,
 semantic + weighted), against the in-memory run: correct 0.722 against 0.750, faithful 0.865 against
