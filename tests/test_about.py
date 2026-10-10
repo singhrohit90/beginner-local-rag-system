@@ -198,3 +198,45 @@ def test_a_tag_cannot_be_rebuilt_from_pieces_after_removal():
     prompt = build_about_prompt("q", prepare([profile]))
     assert prompt.count("<profile") == 1 and prompt.count("</profile>") == 1  # only the one real pair
     assert "<" not in prompt.split("Document profiles:")[1].replace("<profile", "").replace("</profile>", "")
+
+
+# ---- the cap on how many profiles one question may use -----------------------------------------
+
+def _three_documents(service):
+    return [add_document(service, "local", f"book{n}.pdf", f"{REPLICATION} book number {n}") for n in range(3)]
+
+
+def test_more_documents_than_the_cap_is_refused_without_calling_the_model(tmp_path, monkeypatch):
+    calls = []
+    service = DocumentService(root=tmp_path / "uploads", embedder=HashingEmbedder(), embedder_spec="hash",
+                              llm=FakeLLM(lambda system, user: calls.append(user) or "x [D1]"))
+    ids = _three_documents(service)
+    monkeypatch.setattr("rag.api.service.MAX_ABOUT_DOCUMENTS", 2, raising=False)
+    with pytest.raises(BadUpload, match="at most 2 documents"):
+        service.ask_about("local", None, "what are these?")  # the page's "all my documents"
+    with pytest.raises(BadUpload, match="at most 2 documents"):
+        service.ask_about("local", ids, "what are these?")  # an explicit list over the cap
+    assert calls == []  # no prompt was built or sent
+
+
+def test_exactly_the_cap_works(tmp_path, monkeypatch):
+    calls = []
+    service = DocumentService(root=tmp_path / "uploads", embedder=HashingEmbedder(), embedder_spec="hash",
+                              llm=FakeLLM(lambda system, user: calls.append(user) or "x [D1]"))
+    ids = _three_documents(service)
+    monkeypatch.setattr("rag.api.service.MAX_ABOUT_DOCUMENTS", 3, raising=False)
+    assert len(service.ask_about("local", None, "what are these?")["documents"]) == 3
+    assert len(service.ask_about("local", ids, "what are these?")["documents"]) == 3
+    assert len(calls) == 2
+
+
+def test_the_real_cap_is_a_sensible_number_and_the_route_maps_it_to_409(tmp_path, monkeypatch):
+    from rag.api import service as service_module
+
+    assert 5 <= service_module.MAX_ABOUT_DOCUMENTS <= 50  # the request model allows 50 ids at most
+    service, _ = make_service(tmp_path)
+    _three_documents(service)
+    monkeypatch.setattr("rag.api.service.MAX_ABOUT_DOCUMENTS", 2)
+    client = TestClient(create_app(service, allowed_hosts=("testserver",)))
+    refused = client.post("/v1/ask-about", json={"question": "what are these?"})
+    assert refused.status_code == 409 and "at most 2" in refused.json()["detail"]
