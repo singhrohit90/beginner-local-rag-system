@@ -27,7 +27,6 @@ ABOUT_SYSTEM_PROMPT = (
 )
 
 _CITATION = re.compile(r"\bD(\d+)\b")  # the model writes [D1], (D1) or D1
-_CLOSING_TAG = re.compile(r"</?\s*profile\b[^>]*>", re.IGNORECASE)
 
 
 @dataclass
@@ -40,7 +39,7 @@ class AboutAnswer:
 
 def _clean(text: str, withheld: List[str], where: str) -> str:
     """Text from a document with anything that looks like an instruction to the model removed."""
-    text = _CLOSING_TAG.sub("", text)  # the text must not be able to close its own profile tag
+    text = _defang(text)
     result = scan_text(text)
     if result.flagged:
         withheld.append(f"{where} ({', '.join(result.rules)})")
@@ -56,7 +55,7 @@ def prepare(profiles: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
         withheld: List[str] = []
         # A contents entry is one line of text from the document: no tag, no line break (a break could
         # start a fake "name:" line), and nothing that looks like an instruction.
-        toc = [{**e, "title": _one_line(_CLOSING_TAG.sub("", str(e["title"])))} for e in profile["toc"]]
+        toc = [{**e, "title": _one_line(_defang(str(e["title"])))} for e in profile["toc"]]
         toc = [e for e in toc if not scan_text(e["title"]).flagged]
         if len(toc) < len(profile["toc"]):
             withheld.append(f"{len(profile['toc']) - len(toc)} contents entries")
@@ -75,8 +74,15 @@ def prepare(profiles: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return shown
 
 
+def _defang(text: str) -> str:
+    """Document text cannot contain a tag: every angle bracket is replaced, so nothing in it can close
+    the profile it sits in or open another. (Removing "</profile>" is not enough: "</pro</profile>file>"
+    becomes a real one once the inner part is gone.)"""
+    return text.replace("<", "‹").replace(">", "›")
+
+
 def _clean_name(name: str) -> str:
-    return _CLOSING_TAG.sub("", name)[:200]
+    return _defang(name)[:200]
 
 
 def _one_line(text: str) -> str:
