@@ -57,7 +57,26 @@ A profile is text taken from the document, so it is as untrusted as any passage.
 
 On the two HBase books the original question, which abstained before, now gets a comparison: the Definitive
 Guide as the learning book for developers, the Reference Guide as the manual for operators, with page counts
-(554 and 904). This was one real question, not a measurement; see below.
+(554 and 904). After the fixes for the preface (the Reference Guide's opening now comes from its Preface on
+page 9, found through the contents list) and for citations (`[D1]`, `(D1)` and `D1` are all read), the answer
+cites both documents.
+
+The six golden questions (`data/golden/about_questions.jsonl`, run with `python -m rag.experiments.about`) were
+run on 2026-10-10 with `gpt-oss-20b` as generator, asking over both books together. This is a smoke test, not a
+measurement: six questions make one question 16.7 points, the facts were written by an agent and are not yet
+reviewed, and answers differ from run to run.
+
+| Judge | Fully correct | Facts stated |
+|-------|---------------|--------------|
+| `ollama:qwen2.5:7b` | 1 of 5 judged (one answer could not be judged) | 5 of 12 |
+| `gpt-oss-20b` (the generator grading itself) | 5 of 6 | 12 of 14 |
+
+Reading the answers by hand, the small judge marked down answers that were right (it scored the
+Ganglia/JMX/Nagios answer 0 of 2 although it names the right book and chapter) and the self-judge is lenient by
+construction, so the truth lies between. The one question that failed under both judges, the comparison (a001),
+is real: the answer does not state the page counts or that the Reference Guide is the official guide unless asked.
+Whether that fact belongs in the expected answer is for the reviewer of `data/golden/ABOUT_REVIEW.md` to decide.
+Use a judge that is not the generator before quoting a number.
 
 ## Limits and next steps
 
