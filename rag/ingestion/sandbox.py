@@ -16,12 +16,12 @@ if the system refuses, extraction fails with a message that says so instead of r
 
 import contextlib
 import ctypes
+import functools
 import json
 import logging
 import multiprocessing
 import os
 import sys
-from ctypes import wintypes
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -31,6 +31,12 @@ DEFAULT_TIMEOUT_SECONDS = 120
 DEFAULT_MEMORY_MB = 2048
 DEFAULT_MAX_PAGE_CHARS = 50_000  # a dense printed page is about 5,000 characters
 DEFAULT_MAX_TOTAL_CHARS = 20_000_000  # the whole DDIA book is about 2,000,000
+# Bookmarks: the whole DDIA book has a few hundred. These caps keep a hostile outline from making
+# toc.json huge, because the API process (no memory limit) reads it whole and the heading chunker
+# walks it against every page.
+DEFAULT_MAX_TOC_ENTRIES = 10_000  # about 30 times a large book's outline
+DEFAULT_MAX_TOC_TITLE_CHARS = 300  # a long real heading is under 150
+DEFAULT_MAX_TOC_LEVEL = 6  # chapter, section, subsection and a few below; real outlines stop at 3 or 4
 
 
 # Exit codes of the child, each with the reason shown to the owner (no paths).
@@ -47,6 +53,25 @@ REASONS = {
 class ExtractionLimit(Exception):
     """Extraction was stopped or failed inside the sandbox. The message is safe to show the user
     (no paths)."""
+
+
+def limit_toc(entries: list) -> list:
+    """Cut a bookmark list to the TOC caps: drop entries deeper than DEFAULT_MAX_TOC_LEVEL, cut each
+    title, keep the first DEFAULT_MAX_TOC_ENTRIES in document order. Never raises; logs a warning
+    when anything was cut."""
+    kept = [e for e in entries if e["level"] <= DEFAULT_MAX_TOC_LEVEL]
+    too_deep = len(entries) - len(kept)
+    too_many = max(0, len(kept) - DEFAULT_MAX_TOC_ENTRIES)
+    kept = kept[:DEFAULT_MAX_TOC_ENTRIES]
+    cut_titles = 0
+    for entry in kept:
+        if len(entry["title"]) > DEFAULT_MAX_TOC_TITLE_CHARS:
+            entry["title"] = entry["title"][:DEFAULT_MAX_TOC_TITLE_CHARS]
+            cut_titles += 1
+    if too_deep or too_many or cut_titles:
+        logger.warning("bookmark list cut: %d too deep, %d over the entry limit, %d titles shortened",
+                       too_deep, too_many, cut_titles)
+    return kept
 
 
 def _extract_to_files(pdf: str, pages_path: str, toc_path: str, max_page_chars: int,
@@ -73,7 +98,7 @@ def _extract_to_files(pdf: str, pages_path: str, toc_path: str, max_page_chars: 
     if sum(len(page.text) for page in pages) > DEFAULT_MAX_TOTAL_CHARS:
         raise SystemExit(TOO_MUCH_TEXT)  # far larger than any real book
     save_pages(pages, pages_tmp)
-    toc_tmp.write_text(json.dumps(extract_toc(pdf_path), indent=1), encoding="utf-8")
+    toc_tmp.write_text(json.dumps(limit_toc(extract_toc(pdf_path)), indent=1), encoding="utf-8")
     os.replace(toc_tmp, toc_out)
     os.replace(pages_tmp, pages_out)  # last, because the pipeline reuses the pages file when it exists
 
@@ -95,31 +120,32 @@ def _child(target: Callable, args: tuple, memory_mb: int, go) -> None:
     target(*args)
 
 
-class _IoCounters(ctypes.Structure):
-    _fields_ = [(n, ctypes.c_ulonglong) for n in (
-        "ReadOps", "WriteOps", "OtherOps", "ReadBytes", "WriteBytes", "OtherBytes")]
+@functools.lru_cache(maxsize=None)
+def _win():
+    """The Windows-only ctypes pieces, built on first use. `ctypes.wintypes` cannot be imported on
+    Linux and macOS before Python 3.12 (ValueError), so nothing here may run at import time."""
+    from ctypes import wintypes
+    
+    class IoCounters(ctypes.Structure):
+        _fields_ = [(n, ctypes.c_ulonglong) for n in (
+            "ReadOps", "WriteOps", "OtherOps", "ReadBytes", "WriteBytes", "OtherBytes")]
 
+    class BasicLimits(ctypes.Structure):
+        _fields_ = [
+            ("PerProcessUserTimeLimit", ctypes.c_longlong), ("PerJobUserTimeLimit", ctypes.c_longlong),
+            ("LimitFlags", wintypes.DWORD), ("MinimumWorkingSetSize", ctypes.c_size_t),
+            ("MaximumWorkingSetSize", ctypes.c_size_t), ("ActiveProcessLimit", wintypes.DWORD),
+            ("Affinity", ctypes.c_size_t), ("PriorityClass", wintypes.DWORD),
+            ("SchedulingClass", wintypes.DWORD),
+        ]
 
-class _BasicLimits(ctypes.Structure):
-    _fields_ = [
-        ("PerProcessUserTimeLimit", ctypes.c_longlong), ("PerJobUserTimeLimit", ctypes.c_longlong),
-        ("LimitFlags", wintypes.DWORD), ("MinimumWorkingSetSize", ctypes.c_size_t),
-        ("MaximumWorkingSetSize", ctypes.c_size_t), ("ActiveProcessLimit", wintypes.DWORD),
-        ("Affinity", ctypes.c_size_t), ("PriorityClass", wintypes.DWORD),
-        ("SchedulingClass", wintypes.DWORD),
-    ]
+    class ExtendedLimits(ctypes.Structure):
+        _fields_ = [
+            ("Basic", BasicLimits), ("Io", IoCounters), ("ProcessMemoryLimit", ctypes.c_size_t),
+            ("JobMemoryLimit", ctypes.c_size_t), ("PeakProcessMemoryUsed", ctypes.c_size_t),
+            ("PeakJobMemoryUsed", ctypes.c_size_t),
+        ]
 
-
-class _ExtendedLimits(ctypes.Structure):
-    _fields_ = [
-        ("Basic", _BasicLimits), ("Io", _IoCounters), ("ProcessMemoryLimit", ctypes.c_size_t),
-        ("JobMemoryLimit", ctypes.c_size_t), ("PeakProcessMemoryUsed", ctypes.c_size_t),
-        ("PeakJobMemoryUsed", ctypes.c_size_t),
-    ]
-
-
-def _kernel32():
-    """kernel32 with the argument and result types of every call used here."""
     k = ctypes.WinDLL("kernel32", use_last_error=True)
     k.CreateJobObjectW.argtypes = [ctypes.c_void_p, wintypes.LPCWSTR]
     k.CreateJobObjectW.restype = wintypes.HANDLE
@@ -131,7 +157,7 @@ def _kernel32():
     k.AssignProcessToJobObject.restype = wintypes.BOOL
     k.CloseHandle.argtypes = [wintypes.HANDLE]
     k.CloseHandle.restype = wintypes.BOOL
-    return k
+    return k, ExtendedLimits
 
 
 class _WindowsJob:
@@ -143,14 +169,14 @@ class _WindowsJob:
     SET_QUOTA, TERMINATE = 0x0100, 0x0001  # process access rights
 
     def __init__(self) -> None:
-        self._k = _kernel32()
+        self._k, self._limits_type = _win()
         self._handle = self._k.CreateJobObjectW(None, None) or None  # None: no job, limit() fails
 
     def limit(self, pid: int, memory_mb: int) -> bool:
         """Cap the job's memory, allow one process, and put `pid` in it. False on any failure."""
         if not self._handle:
             return False
-        limits = _ExtendedLimits()
+        limits = self._limits_type()
         # A limit on the whole job, and a single process in it: a child that starts more processes
         # would otherwise get a fresh allowance for each.
         limits.Basic.LimitFlags = self.JOB_MEMORY_LIMIT | self.ACTIVE_PROCESS_LIMIT | self.KILL_ON_CLOSE

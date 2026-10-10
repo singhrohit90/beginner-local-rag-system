@@ -134,3 +134,77 @@ def test_each_limit_has_its_own_message(tmp_path):
     with pytest.raises(ExtractionLimit, match="more pages than the limit"):
         extract_in_sandbox(good, tmp_path / "p.jsonl", tmp_path / "t.json", max_pages=1)
     assert len(set(REASONS.values())) == len(REASONS) and TOO_MANY_PAGES != UNREADABLE
+
+
+def test_the_module_imports_where_ctypes_wintypes_cannot_be_imported(monkeypatch):
+    """Linux and macOS before Python 3.12 raise ValueError on `from ctypes import wintypes`. Load a
+    fresh copy of the file with the import forced to fail (deterministic on every platform)."""
+    import builtins
+    import importlib.util
+    import sys
+
+    from rag.ingestion import sandbox
+
+    real_import = builtins.__import__
+
+    def refuse_wintypes(name, globals=None, locals=None, fromlist=(), level=0):
+        if name == "ctypes.wintypes" or (name == "ctypes" and "wintypes" in (fromlist or ())):
+            raise ValueError("_type_ 'v' not supported")
+        return real_import(name, globals, locals, fromlist, level)
+
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(builtins, "__import__", refuse_wintypes)
+    spec = importlib.util.spec_from_file_location("sandbox_fresh_copy", sandbox.__file__)
+    fresh = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(fresh)  # raised ValueError before the fix
+    assert fresh.run_limited and fresh.extract_in_sandbox
+
+
+def _pdf_with_outline(path, toc):
+    import pymupdf
+
+    doc = pymupdf.open()
+    doc.new_page().insert_text((72, 72), "hello")
+    if toc:
+        doc.set_toc(toc)
+    doc.save(path)
+    doc.close()
+
+
+def _run_extract(tmp_path, pdf):
+    import json
+
+    from rag.ingestion import sandbox
+
+    toc = tmp_path / "t.json"
+    sandbox._extract_to_files(str(pdf), str(tmp_path / "p.jsonl"), str(toc), 50_000)
+    return json.loads(toc.read_text(encoding="utf-8"))
+
+
+def test_a_hostile_outline_is_cut_to_the_caps_in_order(tmp_path, caplog):
+    from rag.ingestion import sandbox
+
+    count = sandbox.DEFAULT_MAX_TOC_ENTRIES + 500
+    long_title = "x" * (sandbox.DEFAULT_MAX_TOC_TITLE_CHARS * 3)
+    toc = [[1, f"{i:06d}" + long_title, 1] for i in range(count)]
+    deep = [[level, f"deep{level}", 1] for level in range(1, sandbox.DEFAULT_MAX_TOC_LEVEL + 4)]
+    pdf = tmp_path / "hostile.pdf"
+    _pdf_with_outline(pdf, deep + toc)
+    with caplog.at_level("WARNING", logger=sandbox.logger.name):
+        entries = _run_extract(tmp_path, pdf)
+    assert len(entries) == sandbox.DEFAULT_MAX_TOC_ENTRIES
+    assert max(e["level"] for e in entries) <= sandbox.DEFAULT_MAX_TOC_LEVEL
+    assert max(len(e["title"]) for e in entries) <= sandbox.DEFAULT_MAX_TOC_TITLE_CHARS
+    numbered = [e["title"][:6] for e in entries if e["title"][:6].isdigit()]
+    assert numbered == sorted(numbered) and numbered[0] == "000000"  # document order kept
+    assert "bookmark list cut" in caplog.text
+
+
+def test_a_normal_outline_is_unchanged(tmp_path, caplog):
+    toc = [[1, "Chapter 1", 1], [2, "Section 1.1", 1], [3, "Part", 1], [1, "Chapter 2", 1]]
+    pdf = tmp_path / "normal.pdf"
+    _pdf_with_outline(pdf, toc)
+    with caplog.at_level("WARNING"):
+        entries = _run_extract(tmp_path, pdf)
+    assert [[e["level"], e["title"], e["page"]] for e in entries] == toc
+    assert "bookmark list cut" not in caplog.text
