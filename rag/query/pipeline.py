@@ -53,9 +53,10 @@ class RetrievalPipeline:
         reranker: Optional[Reranker] = None,
         owner: str = "local",
         doc_id: str = "doc",
+        stem: bool = False,
     ) -> "RetrievalPipeline":
         """One document in a fresh in-memory store. Used by the experiments and the tests."""
-        store = MemoryChunkStore.from_chunkset(chunkset, vector_index, doc_id, owner)
+        store = MemoryChunkStore.from_chunkset(chunkset, vector_index, doc_id, owner, stem=stem)
         return cls(store, embedder, Scope(owner), reranker)
 
     def run(self, query_id: str, question: str, config: RetrievalConfig) -> Trace:
