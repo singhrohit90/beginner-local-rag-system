@@ -21,6 +21,7 @@ vector has to be fetched back.
 """
 
 import hashlib
+import json
 import re
 import uuid
 from typing import Any, Dict, List, Optional, Sequence
@@ -32,6 +33,14 @@ from rag.common.types import Chunk
 
 
 class OpenSearchChunkStore:
+    # A bulk request is capped by rows and by bytes. OpenSearch refuses a request over
+    # http.max_content_length (100 MB by default), and a big upload (about 5,500 chunks with their
+    # vectors) reaches that. 500 rows keeps a request short for the server's write queue; 10 MB is a
+    # tenth of the limit, so one oversized row or a JSON estimate that is a little low still fits, and
+    # a timed-out retry re-sends at most 10 MB.
+    MAX_BATCH_ROWS = 500
+    MAX_BATCH_BYTES = 10 * 1024 * 1024
+
     def __init__(
         self,
         embedder_name: str,
@@ -40,7 +49,11 @@ class OpenSearchChunkStore:
         prefix: str = "rag",
         exact: bool = True,
         client: Any = None,
+        max_batch_rows: Optional[int] = None,
+        max_batch_bytes: Optional[int] = None,
     ):
+        self._max_batch_rows = max_batch_rows or self.MAX_BATCH_ROWS
+        self._max_batch_bytes = max_batch_bytes or self.MAX_BATCH_BYTES
         if client is None:
             from opensearchpy import OpenSearch
 
@@ -180,21 +193,55 @@ class OpenSearchChunkStore:
         for chunk in parents.values():
             operations += [{"index": {"_index": parent_index, "_id": chunk.chunk_id}},
                            self._row(doc_id, owner, chunk, None)]
-        if operations:
-            result = self._client.bulk(body=operations, refresh=True)
-            if result.get("errors"):
-                failed = next(item for item in result["items"] if "error" in item["index"])
-                raise RuntimeError(f"OpenSearch refused a chunk: {failed['index']['error']}")
-        # Rows from an earlier version of this document that are not in the new one.
-        for index in (chunk_index, parent_index):
-            self._client.delete_by_query(index=index, refresh=True, body={"query": {"bool": {
-                "filter": [{"term": {"doc_id": doc_id}}],
-                "must_not": [{"terms": {"chunk_id": ids}}] if ids else [],
-            }}})
+        try:
+            self._bulk_in_batches(operations)
+            if operations:
+                self._client.indices.refresh(index=f"{chunk_index},{parent_index}")  # once, not per batch
+            # Rows from an earlier version of this document that are not in the new one.
+            for index in (chunk_index, parent_index):
+                self._client.delete_by_query(index=index, refresh=True, body={"query": {"bool": {
+                    "filter": [{"term": {"doc_id": doc_id}}],
+                    "must_not": [{"terms": {"chunk_id": ids}}] if ids else [],
+                }}})
+        except BaseException:
+            # Part of the document may be written. Leave nothing half-done: remove every row of it and
+            # its record, so has_document is False and the next question indexes it again.
+            try:
+                # Rows from the unrefreshed batches are invisible to delete_by_query until a refresh.
+                self._client.indices.refresh(index=f"{chunk_index},{parent_index}")
+                self._remove_rows(doc_id, [chunk_index, parent_index, self._documents])
+            except Exception:
+                pass  # the original error matters more; has_document is already False for a new document
+            raise
         self._client.index(index=self._documents, id=doc_id, refresh=True, body={
             "doc_id": doc_id, "owner": owner, "embedder": embedder_name,
             "chunks": len(chunks), "info": dict(info or {}),
         })
+
+    def _bulk_in_batches(self, operations: List[Dict[str, Any]]) -> None:
+        """Send action/row pairs in bulk requests of at most max_batch_rows rows and max_batch_bytes bytes."""
+        batch: List[Dict[str, Any]] = []
+        size = 0
+        for i in range(0, len(operations), 2):
+            pair = operations[i:i + 2]
+            pair_size = sum(len(json.dumps(part)) for part in pair)
+            if batch and (len(batch) // 2 >= self._max_batch_rows or size + pair_size > self._max_batch_bytes):
+                self._send(batch)
+                batch, size = [], 0
+            batch += pair
+            size += pair_size
+        if batch:
+            self._send(batch)
+
+    def _send(self, batch: List[Dict[str, Any]]) -> None:
+        result = self._client.bulk(body=batch)
+        if result.get("errors"):
+            failed = next(item for item in result["items"] if "error" in item["index"])
+            raise RuntimeError(f"OpenSearch refused a chunk: {failed['index']['error']}")
+
+    def _remove_rows(self, doc_id: str, indexes: Sequence[str]) -> None:
+        self._client.delete_by_query(index=",".join(indexes), refresh=True, ignore_unavailable=True,
+                                     allow_no_indices=True, body={"query": {"term": {"doc_id": doc_id}}})
 
     @staticmethod
     def _row(doc_id: str, owner: str, chunk: Chunk, vector: Optional[List[float]]) -> Dict[str, Any]:
@@ -208,14 +255,12 @@ class OpenSearchChunkStore:
         return row
 
     def delete_document(self, doc_id: str) -> None:
-        record = self._client.get(index=self._documents, id=doc_id, ignore=[404])
-        if not record.get("found"):
-            return
-        owner = record["_source"]["owner"]
-        for index in (self._chunks_index(owner), self._parents_index(owner)):
-            self._client.delete_by_query(index=index, refresh=True, ignore_unavailable=True,
-                                         body={"query": {"term": {"doc_id": doc_id}}})
-        self._client.delete(index=self._documents, id=doc_id, refresh=True, ignore=[404])
+        """Delete everything kept about a document, in the indexes of EVERY embedder this prefix has seen.
+
+        The embedder can change between indexing and deleting; deleting only the current embedder's
+        indexes would leave the old text and vectors behind. Every row carries doc_id, so one
+        delete_by_query over this prefix's chunk, parent and document indexes covers all of them."""
+        self._remove_rows(doc_id, [f"{self._prefix}_c_*", f"{self._prefix}_p_*", f"{self._prefix}_d_*"])
 
     # ---- reads --------------------------------------------------------------------------
 
