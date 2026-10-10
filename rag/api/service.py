@@ -154,6 +154,23 @@ class DocumentService:
             raise NotFound(doc_id)
         return status
 
+    @classmethod
+    def list_in(cls, root: Path, owner: str) -> List[Dict[str, Any]]:
+        """The owner's documents read straight from the upload folders, with no models loaded. The API
+        uses it for the list while the service is still starting. Only this owner's status files are
+        returned, exactly as in list()."""
+        root = Path(root)
+        found = []
+        for path in root.iterdir() if root.is_dir() else []:
+            if DOC_ID.match(path.name):
+                try:
+                    status = cls._read_json(path / "status.json")
+                except (OSError, ValueError):
+                    continue
+                if status.get("owner", LOCAL_OWNER) == owner:
+                    found.append(status)
+        return sorted(found, key=lambda s: s.get("created", 0), reverse=True)
+
     def list(self, owner: str) -> List[Dict[str, Any]]:
         found = []
         for path in self.root.iterdir():
@@ -237,7 +254,7 @@ class DocumentService:
         text = re.sub(r"[A-Za-z][A-Za-z0-9+.-]*://\S+", "<url>", text)
         text = re.sub(r"[A-Za-z]:[\\/][^'\"\r\n]*", "<path>", text)  # a Windows path, which may hold spaces
         text = re.sub(r"\S*[\\/]\S*", "<path>", text)  # any other word with a separator in it
-        return f"{type(err).__name__}: {text[:300]}"
+        return f"{type(err).__name__}: {text[:1500]}"
 
     @staticmethod
     def _remove_tree(path: Path) -> None:

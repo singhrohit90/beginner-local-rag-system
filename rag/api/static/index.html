@@ -31,8 +31,15 @@
   .a.sel { border-color: var(--accent); }
   .tag { display: inline-block; font-size: 11px; padding: 0 6px; border-radius: 8px; border: 1px solid var(--line); margin-right: 4px; }
   .tag.bad { color: var(--bad); border-color: var(--bad); } .tag.warn { color: var(--warn); border-color: var(--warn); }
-  form.row { display: flex; gap: 6px; margin-top: 8px; }
-  input[type=text] { flex: 1; padding: 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--text); }
+  form.ask { display: grid; gap: 6px; margin-top: 8px; }
+  form.ask .controls { display: flex; gap: 6px; align-items: center; }
+  form.ask .controls button.primary { margin-left: auto; }
+  textarea { width: 100%; min-height: 64px; max-height: 240px; resize: vertical; padding: 8px; font: inherit; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--text); }
+  .skeleton .bar { height: 12px; border-radius: 4px; margin: 6px 0; background: linear-gradient(90deg, var(--line) 25%, var(--bg) 50%, var(--line) 75%); background-size: 200% 100%; animation: shimmer 1.2s infinite linear; }
+  .skeleton .bar.short { width: 55%; }
+  @keyframes shimmer { from { background-position: 200% 0; } to { background-position: -200% 0; } }
+  #starting { color: var(--warn); margin-bottom: 8px; }
+  button.more { padding: 0 8px; font-size: 12px; }
   button, select { padding: 7px 12px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); color: var(--text); cursor: pointer; }
   button.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
   button:disabled { opacity: .5; cursor: default; }
@@ -60,6 +67,7 @@
       </select>
       <button class="primary" type="submit">Upload and index</button>
     </form>
+    <div id="starting" class="meta" hidden>Loading the models (once after each restart). You can look at your documents now; questions open up when this goes away.</div>
     <div id="docs"></div>
   </section>
 
@@ -67,20 +75,22 @@
     <h2 id="title">Select or upload a document</h2>
     <div id="log"></div>
     <div id="error"></div>
-    <form class="row" id="ask">
-      <select id="scope" title="Which documents to search">
-        <option value="one">this document</option>
-        <option value="checked">checked documents</option>
-        <option value="all">all my documents</option>
-      </select>
-      <input type="text" id="question" placeholder="Ask about the document" maxlength="2000" autocomplete="off" disabled>
-      <select id="config" title="Retrieval configuration">
-        <option value="weighted">hybrid (weighted)</option>
-        <option value="rrf">hybrid (rrf)</option>
-        <option value="dense">dense only</option>
-        <option value="bm25">keyword only</option>
-      </select>
-      <button class="primary" type="submit" id="send" disabled>Ask</button>
+    <form class="ask" id="ask">
+      <textarea id="question" rows="3" placeholder="Ask a question (Enter sends, Shift+Enter adds a line)" maxlength="2000" disabled></textarea>
+      <div class="controls">
+        <select id="scope" title="Which documents to search">
+          <option value="all">all my documents</option>
+          <option value="checked">checked documents</option>
+          <option value="one">this document</option>
+        </select>
+        <select id="config" title="Retrieval configuration">
+          <option value="weighted">hybrid (weighted)</option>
+          <option value="rrf">hybrid (rrf)</option>
+          <option value="dense">dense only</option>
+          <option value="bm25">keyword only</option>
+        </select>
+        <button class="primary" type="submit" id="send" disabled>Ask</button>
+      </div>
     </form>
   </section>
 
@@ -93,7 +103,7 @@
 <script>
 // Everything shown comes from documents or a model, so it is untrusted: only textContent is used, never innerHTML.
 const $ = (id) => document.getElementById(id);
-let docs = [], selected = null, answers = {}, poll = null;
+let docs = [], selected = null, answers = {}, poll = null, ready = false;
 const checked = new Set();
 
 function el(tag, props = {}, ...kids) {
@@ -113,7 +123,20 @@ async function api(path, options) {
   return res.status === 204 ? null : res.json();
 }
 
-function showError(message) { $("error").textContent = message || ""; }
+// A long text is shown short with a "more" button that opens the whole of it (and "less" closes it).
+function longText(text, limit = 240) {
+  const box = el("span");
+  if (text.length <= limit) { box.textContent = text; return box; }
+  const shortText = text.slice(0, limit) + "…";
+  const body = el("span", {}, shortText);
+  const toggle = el("button", { type: "button", class: "more", textContent: "more" });
+  let open = false;
+  toggle.onclick = (e) => { e.stopPropagation(); open = !open; body.textContent = open ? text : shortText; toggle.textContent = open ? "less" : "more"; };
+  box.append(body, " ", toggle);
+  return box;
+}
+
+function showError(message) { $("error").replaceChildren(message ? longText(message) : ""); }
 
 async function refresh() {
   docs = await api("/v1/documents");
@@ -123,7 +146,7 @@ async function refresh() {
       el("div", {}, d.name),
       el("small", { class: "state-" + d.state }, d.state === "processing" && d.stage ? "processing: " + d.stage : d.state === "failed" && d.stage ? "failed while " + d.stage : d.state),
       el("small", {}, d.state === "ready" ? ` · ${d.chunks} chunks · ${d.chunker}` + (d.flagged_chunks ? ` · ${d.flagged_chunks} flagged` : "") : ""),
-      el("small", {}, d.error ? " · " + d.error : ""));
+      d.error ? el("small", {}, " · ", longText(d.error, 120)) : el("small"));
     node.onclick = () => select(d.id);
     if (d.state === "ready") {
       const pick = el("input", { type: "checkbox", checked: checked.has(d.id), title: "Include in questions over checked documents" });
@@ -164,12 +187,15 @@ function targets() {
 function updateChat() {
   const d = docs.find((x) => x.id === selected);
   const scope = $("scope").value, ids = targets();
-  const can = ids === null || ids.length > 0;
+  const can = ready && (ids === null || ids.length > 0);
   $("title").textContent = scope === "all" ? "All my documents" : scope === "checked" ? `Checked documents (${checked.size})` : d ? d.name : "Select or upload a document";
   $("question").disabled = !can; $("send").disabled = !can;
-  $("question").placeholder = can ? "Ask a question" : scope === "checked" ? "Tick at least one ready document" : d && d.state !== "ready" ? "Document is " + d.state + "..." : "Select a document first";
+  $("question").placeholder = !ready ? "Loading the models..." : can ? "Ask a question (Enter sends, Shift+Enter adds a line)" : scope === "checked" ? "Tick at least one ready document" : d && d.state !== "ready" ? "Document is " + d.state + "..." : "Select a document first";
 }
 $("scope").onchange = updateChat;
+$("question").onkeydown = (e) => {  // Enter sends, Shift+Enter makes a new line
+  if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); if (!$("send").disabled) $("ask").requestSubmit(); }
+};
 
 $("upload").onsubmit = async (e) => {
   e.preventDefault(); showError("");
@@ -200,7 +226,7 @@ $("ask").onsubmit = async (e) => {
     $("log").append(msg); msg.click(); msg.scrollIntoView();
   } catch (err) {
     showError(err.message);
-    const failed = el("div", { class: "msg a" }, el("span", { class: "tag bad" }, "no answer"), el("br"), err.message);
+    const failed = el("div", { class: "msg a" }, el("span", { class: "tag bad" }, "no answer"), el("br"), longText(err.message));
     $("log").append(failed); failed.scrollIntoView();  // the question stays in the log with its failure beside it
   }
   $("send").disabled = false; $("question").focus();
@@ -224,7 +250,23 @@ function detail(r) {
   }
 }
 
-refresh().then(updateChat).catch((err) => showError(err.message));
+// Placeholder rows while the list loads, so the page shows at once that documents are coming.
+function skeletonRows(count = 3) {
+  const box = $("docs"); box.replaceChildren();
+  for (let i = 0; i < count; i++) box.append(el("div", { class: "doc skeleton" }, el("div", { class: "bar" }), el("div", { class: "bar short" })));
+}
+
+// The server loads its models in the background after a start; questions wait until it says it is ready.
+async function checkReady() {
+  try { ready = (await api("/v1/health")).ready; } catch (_) { ready = false; }
+  $("starting").hidden = ready;
+  updateChat();
+  if (!ready) setTimeout(checkReady, 1500);
+}
+
+skeletonRows();
+checkReady();
+refresh().then(updateChat).catch((err) => { $("docs").replaceChildren(); showError(err.message); });
 </script>
 </body>
 </html>

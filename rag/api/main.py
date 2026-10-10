@@ -25,6 +25,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence
 import logging
 import re
 import threading
+from contextlib import asynccontextmanager
 from urllib.parse import urlparse
 
 from fastapi import APIRouter, BackgroundTasks, Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
@@ -96,10 +97,22 @@ def create_app(
     service_factory: Callable[[], DocumentService] = build_default_service,
     allowed_hosts: Sequence[str] = DEFAULT_HOSTS,
     allowed_origins: Sequence[str] = (),
+    uploads_root: Optional[Path] = None,
+    warm_up: bool = True,
 ) -> FastAPI:
     """allowed_hosts: host names the server answers to (no port). allowed_origins: extra browser
-    origins, as "scheme://host:port", besides the server's own."""
-    app = FastAPI(title="RAG document chat")
+    origins, as "scheme://host:port", besides the server's own. uploads_root: where the document
+    folders are, so the list can be read before the models have loaded. warm_up: load the models in
+    the background at startup."""
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI):
+        # Loading the models takes a while, so start it now, in the background, instead of on the first
+        # request. The page and the document list work meanwhile.
+        if warm_up and state["service"] is None:
+            threading.Thread(target=svc, daemon=True, name="warm-up").start()
+        yield
+
+    app = FastAPI(title="RAG document chat", lifespan=lifespan)
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=list(allowed_hosts))
 
     @app.middleware("http")
@@ -139,7 +152,9 @@ def create_app(
 
     @v1.get("/health")
     def health() -> Dict[str, Any]:
-        return {"ok": True, "chunkers": list(STRATEGIES), "configs": USABLE_CONFIGS}
+        # ready: the models are loaded, so questions and uploads will not wait
+        return {"ok": True, "ready": state["service"] is not None, "chunkers": list(STRATEGIES),
+                "configs": USABLE_CONFIGS}
 
     @v1.post("/documents", status_code=202)
     async def upload(background: BackgroundTasks, file: UploadFile = File(...),
@@ -161,6 +176,8 @@ def create_app(
 
     @v1.get("/documents")
     def list_documents(owner: str = Depends(current_owner)) -> List[Dict[str, Any]]:
+        if state["service"] is None and uploads_root is not None:
+            return DocumentService.list_in(uploads_root, owner)  # no need to wait for the models
         return svc().list(owner)
 
     @v1.get("/documents/{doc_id}")
@@ -193,8 +210,8 @@ def create_app(
             logger.exception("ask failed for %s", what)
             # the caller gets the reason without internal addresses; the full error is in the server log
             reason = re.sub(r"https?://\S+", "<url>", str(err))
-            if len(reason) > 500:  # a long message is cut at a word and says so, never mid-sentence
-                reason = reason[:500].rsplit(" ", 1)[0] + " ..."
+            if len(reason) > 4000:  # the page folds long text behind "more"; this only stops a huge dump
+                reason = reason[:4000].rsplit(" ", 1)[0] + " ..."
             raise HTTPException(502, f"{type(err).__name__}: {reason}")
 
     @v1.post("/documents/{doc_id}/ask")
@@ -219,5 +236,7 @@ def _csv(name: str, default: str = "") -> List[str]:
 
 
 # RAG_ALLOWED_HOSTS: host names this server answers to; RAG_ALLOWED_ORIGINS: extra browser origins.
+from rag.common.config import DATA_DIR  # noqa: E402  (paths only, nothing heavy)
+
 app = create_app(allowed_hosts=_csv("RAG_ALLOWED_HOSTS", ",".join(DEFAULT_HOSTS)),
-                 allowed_origins=_csv("RAG_ALLOWED_ORIGINS"))
+                 allowed_origins=_csv("RAG_ALLOWED_ORIGINS"), uploads_root=DATA_DIR / "uploads")

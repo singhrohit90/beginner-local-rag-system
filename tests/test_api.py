@@ -634,15 +634,15 @@ def test_a_long_model_error_is_not_cut_in_the_middle_of_a_sentence(tmp_path):
     client, _ = make_client(tmp_path, llm=FakeLLM(broken))
     doc_id = upload(client, make_pdf(REPLICATION)).json()["id"]
     detail = client.post(f"/v1/documents/{doc_id}/ask", json={"question": "replication"}).json()["detail"]
-    assert "10.1.2.3" not in detail and "end of explanation." in detail  # about 370 characters, shown whole (the old limit was 200)
+    assert "10.1.2.3" not in detail and "end of explanation." in detail  # about 370 characters, sent whole
 
     def very_long(system, user):
-        raise RuntimeError("word " * 400)
+        raise RuntimeError("word " * 1200)
 
     client, _ = make_client(tmp_path / "b", llm=FakeLLM(very_long))
     doc_id = upload(client, make_pdf(REPLICATION)).json()["id"]
     detail = client.post(f"/v1/documents/{doc_id}/ask", json={"question": "replication"}).json()["detail"]
-    assert detail.endswith(" ...") and len(detail) < 560
+    assert detail.endswith(" ...") and len(detail) < 4100
 
 
 def test_choosing_another_document_keeps_the_conversation_on_the_page(tmp_path):
@@ -651,3 +651,43 @@ def test_choosing_another_document_keeps_the_conversation_on_the_page(tmp_path):
     select_function = page[page.index("function select("):page.index("function scopeLabel")]
     assert "replaceChildren" not in select_function  # the log is not cleared when the selection changes
     assert "asked of:" in page and "no answer" in page
+
+
+def test_the_ask_box_is_multi_line_with_scope_and_mode_below_it_and_errors_fold(tmp_path):
+    client, _ = make_client(tmp_path)
+    page = client.get("/").text
+    assert '<textarea id="question"' in page
+    assert page.index('id="question"') < page.index('id="scope"') < page.index('id="config"') < page.index('id="send"')
+    assert page.index('<option value="all">') < page.index('<option value="one">')
+    assert "function longText" in page and '"more"' in page  # long errors show a short form and a "more" button
+
+
+def test_the_list_is_readable_before_the_models_have_loaded(tmp_path):
+    client, service = make_client(tmp_path)
+    doc_id = upload(client, make_pdf(REPLICATION)).json()["id"]
+    # a second server on the same folder, with its service not built yet, and no warm-up
+    def not_built():
+        raise AssertionError("the models must not load for the list")
+
+    cold = TestClient(create_app(service_factory=not_built, allowed_hosts=("testserver",),
+                                 uploads_root=tmp_path / "uploads", warm_up=False))
+    health = cold.get("/v1/health").json()
+    assert health["ready"] is False
+    assert [d["id"] for d in cold.get("/v1/documents").json()] == [doc_id]
+
+
+def test_the_list_before_loading_shows_only_the_callers_documents(tmp_path):
+    from rag.api.service import DocumentService
+
+    service = make_client(tmp_path)[1]
+    mine = service.create("a.pdf", make_pdf(REPLICATION), "alice")["id"]
+    service.create("b.pdf", make_pdf(COMPACTION), "bob")
+    assert [d["id"] for d in DocumentService.list_in(tmp_path / "uploads", "alice")] == [mine]
+    assert DocumentService.list_in(tmp_path / "missing", "alice") == []
+
+
+def test_the_page_shows_skeleton_rows_and_waits_for_the_models(tmp_path):
+    client, _ = make_client(tmp_path)
+    page = client.get("/").text
+    assert "function skeletonRows" in page and "skeleton" in page
+    assert "checkReady" in page and 'id="starting"' in page and "const can = ready &&" in page
