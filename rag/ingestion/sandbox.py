@@ -24,7 +24,8 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_TIMEOUT_SECONDS = 120
 DEFAULT_MEMORY_MB = 2048
-DEFAULT_MAX_PAGE_CHARS = 200_000  # a dense printed page is about 5,000 characters
+DEFAULT_MAX_PAGE_CHARS = 50_000  # a dense printed page is about 5,000 characters
+DEFAULT_MAX_TOTAL_CHARS = 20_000_000  # the whole DDIA book is about 2,000,000
 
 
 class ExtractionLimit(Exception):
@@ -40,7 +41,10 @@ def _extract_to_files(pdf: str, pages_path: str, toc_path: str, max_page_chars: 
     pdf_path, pages_out, toc_out = Path(pdf), Path(pages_path), Path(toc_path)
     pages_tmp = pages_out.with_name(pages_out.name + ".tmp")
     toc_tmp = toc_out.with_name(toc_out.name + ".tmp")
-    save_pages(extract_pages(pdf_path, max_page_chars=max_page_chars), pages_tmp)
+    pages = extract_pages(pdf_path, max_page_chars=max_page_chars)
+    if sum(len(page.text) for page in pages) > DEFAULT_MAX_TOTAL_CHARS:
+        raise SystemExit(5)  # the pages together are far larger than any real book
+    save_pages(pages, pages_tmp)
     toc_tmp.write_text(json.dumps(extract_toc(pdf_path), indent=1), encoding="utf-8")
     os.replace(toc_tmp, toc_out)
     os.replace(pages_tmp, pages_out)  # last, because the pipeline reuses the pages file when it exists
@@ -55,6 +59,7 @@ def _child(target: Callable, args: tuple, memory_mb: int) -> None:
             resource.setrlimit(resource.RLIMIT_AS, (limit, limit))
         except (ImportError, ValueError, OSError):
             logger.warning("could not set a memory limit on the extraction process")
+            raise SystemExit(4)  # no limit means no sandbox: do not run the file unbounded
     target(*args)
 
 
@@ -83,7 +88,7 @@ def _limit_memory_windows(pid: int, memory_mb: int) -> bool:
             ("PeakJobMemoryUsed", ctypes.c_size_t),
         ]
 
-    process_memory_limit, kill_on_close = 0x100, 0x2000
+    active_process_limit, job_memory_limit, kill_on_close = 0x8, 0x200, 0x2000
     extended_limit_class = 9
     set_quota, terminate = 0x0100, 0x0001  # process access rights
 
@@ -99,8 +104,11 @@ def _limit_memory_windows(pid: int, memory_mb: int) -> bool:
     if not job:
         return False
     limits = ExtendedLimits()
-    limits.Basic.LimitFlags = process_memory_limit | kill_on_close
-    limits.ProcessMemoryLimit = memory_mb * 1024 * 1024
+    # A limit on the whole job, and a single process in it: a child that starts more processes
+    # would otherwise get a fresh allowance for each.
+    limits.Basic.LimitFlags = job_memory_limit | active_process_limit | kill_on_close
+    limits.Basic.ActiveProcessLimit = 1
+    limits.JobMemoryLimit = memory_mb * 1024 * 1024
     handle = kernel32.OpenProcess(set_quota | terminate, False, pid)
     ok = bool(handle) and bool(kernel32.SetInformationJobObject(
         job, extended_limit_class, ctypes.byref(limits), ctypes.sizeof(limits))) \
@@ -134,7 +142,10 @@ def run_limited(target: Callable, args: tuple = (), timeout: float = DEFAULT_TIM
     process.start()
     try:
         if sys.platform == "win32" and not _limit_memory_windows(process.pid, memory_mb):
-            logger.warning("could not set a memory limit on the extraction process")
+            # no limit means no sandbox: refuse to run the file rather than run it unbounded
+            process.kill()
+            process.join()
+            raise ExtractionLimit("PDF extraction could not be started with a memory limit")
         process.join(timeout)
         if process.is_alive():
             process.kill()

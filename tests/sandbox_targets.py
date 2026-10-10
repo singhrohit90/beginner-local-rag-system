@@ -16,3 +16,10 @@ def use_a_gigabyte(*args):
 
 def fail_quietly(*args):
     raise SystemExit(3)
+
+
+def start_another_process(*args):
+    import subprocess
+    import sys
+
+    subprocess.run([sys.executable, "-c", "pass"], check=True)  # refused: the job allows one process
