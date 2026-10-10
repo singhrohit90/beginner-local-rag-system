@@ -54,11 +54,18 @@ def prepare(profiles: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
     shown = []
     for number, profile in enumerate(profiles, start=1):
         withheld: List[str] = []
-        toc = [e for e in profile["toc"] if not scan_text(e["title"]).flagged]
+        # A contents entry is one line of text from the document: no tag, no line break (a break could
+        # start a fake "name:" line), and nothing that looks like an instruction.
+        toc = [{**e, "title": _one_line(_CLOSING_TAG.sub("", str(e["title"])))} for e in profile["toc"]]
+        toc = [e for e in toc if not scan_text(e["title"]).flagged]
         if len(toc) < len(profile["toc"]):
             withheld.append(f"{len(profile['toc']) - len(toc)} contents entries")
+        name = _one_line(_clean_name(profile["name"]))
+        if scan_text(name).flagged:  # the file name is text too, and anyone who can upload chooses it
+            withheld.append("document name")
+            name = "(name withheld)"
         shown.append({
-            "label": f"D{number}", "name": _clean_name(profile["name"]), "pages": profile["pages"],
+            "label": f"D{number}", "name": name, "pages": profile["pages"],
             "toc_total": profile["toc_total"], "toc": toc,
             "title_page": _clean(profile["title_page"], withheld, "title page"),
             "opening_page": profile["opening_page"],
@@ -70,6 +77,10 @@ def prepare(profiles: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 def _clean_name(name: str) -> str:
     return _CLOSING_TAG.sub("", name)[:200]
+
+
+def _one_line(text: str) -> str:
+    return " ".join(text.split())[:200]
 
 
 def build_about_prompt(question: str, shown: Sequence[Dict[str, Any]]) -> str:
