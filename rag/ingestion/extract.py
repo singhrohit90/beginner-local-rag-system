@@ -10,7 +10,7 @@ import logging
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 import pymupdf
 
@@ -77,22 +77,28 @@ def _block_text(block: dict) -> tuple:
 
 
 def _read_blocks(
-    pdf_path: Path, header_fraction: float, footer_fraction: float
+    pdf_path: Path, header_fraction: float, footer_fraction: float, max_page_chars: Optional[int] = None
 ) -> List[List[_Block]]:
     pages: List[List[_Block]] = []
     with pymupdf.open(pdf_path) as doc:
         for page in doc:
             height = page.rect.height
             blocks = []
+            chars = 0
             for block in page.get_text("dict", sort=True)["blocks"]:
                 if block["type"] != 0:  # 0 = text, 1 = image
                     continue
+                if max_page_chars is not None and chars >= max_page_chars:
+                    break  # a page this large is hostile or broken; keep what we have
                 _x0, y0, _x1, y1 = block["bbox"]
                 centre = (y0 + y1) / 2  # a footer can start a little above the zone edge
                 in_margin = centre <= height * header_fraction or centre >= height * (
                     1 - footer_fraction
                 )
                 text, is_code = _block_text(block)
+                if max_page_chars is not None:
+                    text = text[: max_page_chars - chars]  # one huge block is cut as well
+                chars += len(text)
                 blocks.append(_Block(text=text, in_margin=in_margin, is_code=is_code))
             pages.append(blocks)
     return pages
@@ -147,8 +153,9 @@ def extract_pages(
     header_fraction: float = HEADER_FRACTION,
     footer_fraction: float = FOOTER_FRACTION,
     repeat_threshold: float = REPEAT_THRESHOLD,
+    max_page_chars: Optional[int] = None,  # None = no cap (CLI); the API sandbox sets one
 ) -> List[Page]:
-    raw = _read_blocks(Path(pdf_path), header_fraction, footer_fraction)
+    raw = _read_blocks(Path(pdf_path), header_fraction, footer_fraction, max_page_chars)
     pages = build_pages(raw, repeat_threshold)
     empty = [p.page_no for p in pages if not p.text]
     logger.info("Extracted %d pages, %d empty %s", len(pages), len(empty), empty[:20])
