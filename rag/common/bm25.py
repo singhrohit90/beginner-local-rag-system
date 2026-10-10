@@ -5,14 +5,14 @@
 
 k1 limits how much repeating a word helps, and b controls how much long documents are penalised.
 By default there is no stemming, so 'index' and 'indexes' are different terms. Stemming (a Porter
-stemmer, `rag/common/stem.py`) is optional: `BM25Index(chunks, stem=True)`, or change `DEFAULT_STEM`.
+stemmer, `rag/common/stem.py`) is optional: `BM25Index(chunks, stem=True)`, or `MemoryChunkStore(stem=True)`.
 It is off so existing results stay identical.
 """
 
 import math
 import re
 from collections import Counter, defaultdict
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, List, Sequence, Tuple
 
 import numpy as np
 
@@ -26,9 +26,6 @@ _STOP = frozenset(
 )
 
 
-DEFAULT_STEM = False  # what BM25Index uses when not told; the retrieval experiment can switch it
-
-
 def tokenize(text: str, drop_stopwords: bool = True, stem: bool = False) -> List[str]:
     tokens = _TOKEN.findall(text.lower().replace("’", "'"))
     tokens = [t for t in tokens if not (drop_stopwords and t in _STOP)]
@@ -36,9 +33,9 @@ def tokenize(text: str, drop_stopwords: bool = True, stem: bool = False) -> List
 
 
 class BM25Index:
-    def __init__(self, chunks: Sequence[Chunk], k1: float = 1.5, b: float = 0.75, stem: Optional[bool] = None):
+    def __init__(self, chunks: Sequence[Chunk], k1: float = 1.5, b: float = 0.75, stem: bool = False):
         self.k1, self.b = k1, b
-        self.stem = DEFAULT_STEM if stem is None else stem
+        self.stem = stem
         self.postings: Dict[str, List[Tuple[int, int]]] = defaultdict(list)
         lengths = []
         for row, chunk in enumerate(chunks):

@@ -1,5 +1,9 @@
+import numpy as np
+
 from rag.common.bm25 import BM25Index, tokenize
+from rag.common.chunk_store import MemoryChunkStore, Scope
 from rag.common.stem import stem
+from rag.common.types import Chunk
 
 
 def test_stem_known_porter_pairs():
@@ -48,3 +52,23 @@ def test_stemming_matches_other_word_forms_only_when_on():
 
 def test_default_is_off():
     assert BM25Index([_C("indexes")]).stem is False
+    assert MemoryChunkStore().stem is False
+
+
+def _store(stem):
+    store = MemoryChunkStore(stem=stem)
+    chunks = [Chunk("a", "the secondary indexes are rebuilt", 1, 1, "t"), Chunk("b", "clocks drift", 1, 1, "t")]
+    store.upsert("d", "u", chunks, np.eye(2, 4, dtype=np.float32), "emb")
+    return store
+
+
+def test_stores_in_one_process_do_not_share_the_stem_setting():
+    on, off = _store(True), _store(False)
+    scope = Scope("u")
+    assert [c.chunk_id for c, _ in on.search_keyword("indexing", 2, scope)] == ["a"]
+    assert off.search_keyword("indexing", 2, scope) == []
+    assert _store(False).search_keyword("indexing", 2, scope) == []  # built after the stemming store: unaffected
+
+
+def test_copy_keeps_the_stem_setting():
+    assert _store(True).copy().stem is True and _store(False).copy().stem is False

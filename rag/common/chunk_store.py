@@ -74,7 +74,8 @@ class MemoryChunkStore:
     """Exact cosine search and BM25 held in memory. This is what the experiments and tests use,
     and it behaves like the previous per-corpus indexes when a scope covers one document."""
 
-    def __init__(self) -> None:
+    def __init__(self, stem: bool = False) -> None:
+        self.stem = stem  # passed to every BM25Index this store builds; off by default
         # The API serves requests from several threads, so every method takes this lock.
         self._lock = threading.RLock()
         self._docs: Dict[str, _Document] = {}
@@ -83,16 +84,16 @@ class MemoryChunkStore:
 
     @classmethod
     def from_chunkset(cls, chunkset: Any, vector_index: VectorIndex, doc_id: str = "doc",
-                      owner: str = "local") -> "MemoryChunkStore":
+                      owner: str = "local", stem: bool = False) -> "MemoryChunkStore":
         """A store holding one document: a ChunkSet and the VectorIndex built from it."""
-        store = cls()
+        store = cls(stem=stem)
         store.upsert(doc_id, owner, chunkset.chunks, vector_index.vectors, vector_index.embedder_name,
                      chunkset.parents, {"chunker": chunkset.strategy, "chunker_params": chunkset.params})
         return store
 
     def copy(self) -> "MemoryChunkStore":
         """A store with the same documents; adding to the copy leaves this one untouched."""
-        other = MemoryChunkStore()
+        other = MemoryChunkStore(stem=self.stem)
         with self._lock:
             other._docs = dict(self._docs)
             other._doc_of_chunk = dict(self._doc_of_chunk)
@@ -168,7 +169,7 @@ class MemoryChunkStore:
                 return []
             if key not in self._bm25:
                 chunks = [c for doc_id in key for c in self._docs[doc_id].chunks]
-                self._bm25[key] = (BM25Index(chunks), chunks)  # one index, so scores are comparable
+                self._bm25[key] = (BM25Index(chunks, stem=self.stem), chunks)  # one index, so scores are comparable
             index, chunks = self._bm25[key]
             return [(chunks[row], score) for row, score in index.search(text, k)]
 

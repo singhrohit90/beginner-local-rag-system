@@ -22,7 +22,6 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from rag.common import bm25
 from rag.ingestion.chunking.base import load_chunkset
 from rag.common.config import GOLDEN_DIR, PROCESSED_DIR
 from rag.common.embed import get_embedder
@@ -91,8 +90,6 @@ def main() -> None:
                         help="count a hit when it overlaps the gold pages, even without the evidence text")
     args = parser.parse_args()
     setup_logging()
-    if args.bm25_stem:
-        bm25.DEFAULT_STEM = True
 
     questions = load_golden(args.golden)
     embedder = get_embedder(args.embedder)
@@ -118,7 +115,7 @@ def main() -> None:
                 name, index.meta["median_tokens"], index.meta["truncated_pct"], index.meta["max_tokens"],
             )
         if database is None:
-            pipeline = RetrievalPipeline.from_chunkset(chunkset, index, embedder, reranker)
+            pipeline = RetrievalPipeline.from_chunkset(chunkset, index, embedder, reranker, stem=args.bm25_stem)
         else:  # one document per chunking strategy, so a search only sees that strategy's chunks
             index_document(database, name, "local", chunkset, index)
             pipeline = RetrievalPipeline(database, embedder, Scope("local", (name,)), reranker)
