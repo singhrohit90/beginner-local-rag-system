@@ -14,6 +14,24 @@ def test_tokenize_default_does_not_stem():
     assert tokenize("The indexes of partitioned logs", stem=True) == ["index", "partit", "log"]
 
 
+# Examples from Porter's 1980 paper (the original algorithm), so a slip in any rule shows up here.
+PORTER_PAIRS = """caresses caress ponies poni ties ti caress caress cats cat feed feed agreed agre plastered plaster
+bled bled motoring motor sing sing conflated conflat troubled troubl sized size hopping hop tanned tan
+falling fall hissing hiss fizzed fizz failing fail filing file happy happi sky sky relational relat
+conditional condit rational ration digitizer digit operator oper feudalism feudal decisiveness decis
+hopefulness hope callousness callous formaliti formal sensitiviti sensit sensibiliti sensibl
+triplicate triplic formative form formalize formal electriciti electr electrical electr hopeful hope
+goodness good revival reviv allowance allow inference infer airliner airlin gyroscopic gyroscop
+adjustable adjust defensible defens irritant irrit replacement replac adjustment adjust dependent depend
+adoption adopt homologou homolog communism commun activate activ angulariti angular homologous homolog
+effective effect bowdlerize bowdler probate probat rate rate cease ceas controll control roll roll""".split()
+
+
+def test_stemmer_matches_porters_published_examples():
+    words = PORTER_PAIRS[::2]
+    wanted = PORTER_PAIRS[1::2]
+    assert [stem(w) for w in words] == wanted
+
 
 class _C:
     def __init__(self, text):

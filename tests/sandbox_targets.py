@@ -23,3 +23,16 @@ def start_another_process(*args):
     import sys
 
     subprocess.run([sys.executable, "-c", "pass"], check=True)  # refused: the job allows one process
+
+
+def write_marker(path, *args):
+    from pathlib import Path
+
+    Path(path).write_text("started")
+
+
+def leave_a_partial_file_then_sleep(pdf, pages_path, toc_path, *args):
+    from pathlib import Path
+
+    Path(str(pages_path) + ".tmp").write_text("half")
+    time.sleep(120)

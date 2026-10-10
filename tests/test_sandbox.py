@@ -90,3 +90,47 @@ def test_pages_that_are_together_far_larger_than_a_book_are_refused(tmp_path, mo
     with pytest.raises(SystemExit) as stop:
         sandbox._extract_to_files(str(pdf), str(tmp_path / "p.jsonl"), str(tmp_path / "t.json"), 50_000)
     assert stop.value.code == 5 and not (tmp_path / "p.jsonl").exists()
+
+
+def test_the_child_does_not_start_work_before_its_limits_are_in_place(tmp_path, monkeypatch):
+    import sys
+
+    from rag.ingestion import sandbox
+    from tests.sandbox_targets import write_marker
+
+    if sys.platform != "win32":
+        pytest.skip("the parent applies the limit only on Windows")
+    marker = tmp_path / "started.txt"
+    seen = {}
+
+    def slow_limit(pid, memory_mb):
+        time.sleep(4)  # more than enough for the child to start and get going if it were not waiting
+        seen["early"] = marker.exists()
+        return True
+
+    monkeypatch.setattr(sandbox, "_limit_memory_windows", slow_limit)
+    sandbox.run_limited(write_marker, (str(marker),), timeout=60, memory_mb=512)
+    assert seen["early"] is False and marker.exists()
+
+
+def test_a_killed_child_leaves_no_temporary_files(tmp_path):
+    from tests.sandbox_targets import leave_a_partial_file_then_sleep
+
+    pdf, pages, toc = tmp_path / "x.pdf", tmp_path / "x.pages.jsonl", tmp_path / "x.toc.json"
+    with pytest.raises(ExtractionLimit, match="longer than"):
+        extract_in_sandbox(pdf, pages, toc, timeout=3, target=leave_a_partial_file_then_sleep)
+    assert not list(tmp_path.glob("*.tmp"))
+
+
+def test_each_limit_has_its_own_message(tmp_path):
+    from rag.ingestion.sandbox import REASONS, TOO_MANY_PAGES, UNREADABLE
+
+    bad = tmp_path / "bad.pdf"
+    bad.write_bytes(b"%PDF-1.4 not a pdf")
+    with pytest.raises(ExtractionLimit, match="could not be opened"):
+        extract_in_sandbox(bad, tmp_path / "p.jsonl", tmp_path / "t.json")
+    good = tmp_path / "good.pdf"
+    good.write_bytes(make_pdf(REPLICATION, COMPACTION))
+    with pytest.raises(ExtractionLimit, match="more pages than the limit"):
+        extract_in_sandbox(good, tmp_path / "p.jsonl", tmp_path / "t.json", max_pages=1)
+    assert len(set(REASONS.values())) == len(REASONS) and TOO_MANY_PAGES != UNREADABLE

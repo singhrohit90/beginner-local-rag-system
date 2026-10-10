@@ -34,3 +34,10 @@ Open items that are not built yet, with the reason each matters. Newest first in
 - WSL shuts down when nothing is attached, which stops OpenSearch. A background `wsl ... sleep` keeps it alive for now; a permanent fix means changing the WSL idle setting.
 - The API runs on Windows because the model tunnel, the GPU and the files are there. Running it in a container needs the tunnel reachable from Docker.
 - `docker-compose.yml` has the OpenSearch security plugin off; it is bound to `127.0.0.1` only. Enable security before anything else can reach it.
+
+## From the code review of the extraction limits (not fixed)
+
+- **Stemming is a global switch.** `--bm25-stem` sets `rag.common.bm25.DEFAULT_STEM`, and every index built afterwards in that process follows it. Pass `stem` through the store or the retrieval config instead.
+- **Windows job handles.** `rag/ingestion/sandbox.py` keeps them in a module-level dict (`_JOBS`) and reloads `kernel32` without `argtypes` to close them. A small class that owns the handle would remove both.
+- **`max_page_chars` bounds the output, not the work.** `page.get_text("dict")` has already built the whole page when the cut is made, and margin blocks use the same budget. The time and memory limits are the real protection.
+- **The sandbox has only run on Windows.** On Linux and macOS the child sets `RLIMIT_AS` itself; if the system refuses, extraction fails with a message that says so. Run its tests on Linux before deploying there.

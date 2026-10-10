@@ -172,10 +172,6 @@ class DocumentService:
             raise TooLarge(f"file is larger than {self.max_upload_bytes // (1024 * 1024)} MB")
         if not data.startswith(b"%PDF"):  # trust the content, not the extension
             raise BadUpload("not a PDF file")
-        # The size limit counts compressed bytes, and a small PDF can expand to a huge number of pages
-        # or large page streams, so the page count is limited too.
-        if self._page_count(data) > self.max_pages:
-            raise TooLarge(f"the PDF has more than {self.max_pages} pages")
         digest = hashlib.sha256(data).hexdigest()
         with self._create_lock:
             # The same file with the same chunker uploaded again by the same owner is the same document.
@@ -230,7 +226,8 @@ class DocumentService:
 
     def _extract(self, pdf: Path, pages_path: Path, toc_path: Path) -> None:
         """PDF -> pages in a child process with a time and memory limit (see sandbox.py)."""
-        extract_in_sandbox(pdf, pages_path, toc_path, self.extract_timeout, self.extract_memory_mb)
+        extract_in_sandbox(pdf, pages_path, toc_path, self.extract_timeout, self.extract_memory_mb,
+                           max_pages=self.max_pages)
 
     @staticmethod
     def _public_error(err: Exception) -> str:
@@ -241,17 +238,6 @@ class DocumentService:
         text = re.sub(r"[A-Za-z]:[\\/][^'\"\r\n]*", "<path>", text)  # a Windows path, which may hold spaces
         text = re.sub(r"\S*[\\/]\S*", "<path>", text)  # any other word with a separator in it
         return f"{type(err).__name__}: {text[:300]}"
-
-    @staticmethod
-    def _page_count(data: bytes) -> int:
-        """Pages in the PDF, read from its page tree without decoding any page."""
-        import pymupdf
-
-        try:
-            with pymupdf.open(stream=data, filetype="pdf") as doc:
-                return doc.page_count
-        except Exception as err:
-            raise BadUpload("the PDF could not be opened (damaged or encrypted)") from err
 
     @staticmethod
     def _remove_tree(path: Path) -> None:
