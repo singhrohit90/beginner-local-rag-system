@@ -92,6 +92,10 @@
           <option value="checked">checked documents</option>
           <option value="one">this document</option>
         </select>
+        <select id="mode" title="What the question is about">
+          <option value="content">about their content</option>
+          <option value="about">about the documents themselves</option>
+        </select>
         <select id="config" title="Retrieval configuration">
           <option value="weighted">hybrid (weighted)</option>
           <option value="rrf">hybrid (rrf)</option>
@@ -199,9 +203,11 @@ function updateChat() {
   const can = ready && (ids === null || ids.length > 0);
   $("title").textContent = scope === "all" ? "All my documents" : scope === "checked" ? `Checked documents (${checked.size})` : d ? d.name : "Select or upload a document";
   $("question").disabled = !can; $("send").disabled = !can;
+  $("config").disabled = $("mode").value === "about";  // retrieval settings do not apply to profiles
   $("question").placeholder = !ready ? "Loading the models..." : can ? "Ask a question (Enter sends, Shift+Enter adds a line)" : scope === "checked" ? "Tick at least one ready document" : d && d.state !== "ready" ? "Document is " + d.state + "..." : "Select a document first";
 }
 $("scope").onchange = updateChat;
+$("mode").onchange = updateChat;
 $("question").onkeydown = (e) => {  // Enter sends, Shift+Enter makes a new line
   if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); if (!$("send").disabled) $("ask").requestSubmit(); }
 };
@@ -225,13 +231,14 @@ $("ask").onsubmit = async (e) => {
   const asked = el("div", { class: "msg q" }, question, el("br"), el("small", { class: "meta" }, "asked of: " + scopeLabel()));
   $("log").append(asked);
   try {
-    const r = await api("/v1/ask", { method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ question, doc_ids: ids, config: $("config").value }) });
+    const about = $("mode").value === "about";  // compare or describe the documents, from their profiles
+    const r = await api(about ? "/v1/ask-about" : "/v1/ask", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(about ? { question, doc_ids: ids } : { question, doc_ids: ids, config: $("config").value }) });
     answers[r.query_id] = r;
     const msg = el("div", { class: "msg a" }, r.answer || "");
     if (r.blocked.length) msg.prepend(el("span", { class: "tag bad" }, "withheld: " + r.blocked.join(", ")), el("br"));
     if (r.abstained) msg.prepend(el("span", { class: "tag warn" }, "abstained"), el("br"));
-    msg.onclick = () => { document.querySelectorAll(".a").forEach((n) => n.classList.remove("sel")); msg.classList.add("sel"); detail(r); };
+    msg.onclick = () => { document.querySelectorAll(".a").forEach((n) => n.classList.remove("sel")); msg.classList.add("sel"); r.profiles ? detailAbout(r) : detail(r); };
     $("log").append(msg); msg.click(); msg.scrollIntoView();
   } catch (err) {
     showError(err.message);
@@ -240,6 +247,21 @@ $("ask").onsubmit = async (e) => {
   }
   $("send").disabled = false; $("question").focus();
 };
+
+// What an "about the documents" answer was based on: each document's profile as the model saw it.
+function detailAbout(r) {
+  const box = $("detail"); box.replaceChildren();
+  box.append(el("div", { class: "meta" }, `${r.llm} · ${r.seconds}s · cited: ${r.citations.join(", ") || "none"}`));
+  box.append(el("h2", {}, "Profiles sent to the model"));
+  for (const p of r.profiles) {
+    const part = el("div", { class: "passage" + (r.citations.includes(p.label) ? " cited" : "") },
+      el("div", { class: "meta" }, `[${p.label}] ${p.name} · ${p.pages} pages · ${p.toc.length} of ${p.toc_total} contents entries`));
+    if (p.withheld.length) part.append(el("div", { class: "meta" }, "left out as instruction-like: " + p.withheld.join("; ")));
+    part.append(el("div", { class: "meta" }, "Contents"), el("pre", {}, p.toc.map((e) => "  ".repeat(e.level - 1) + e.title + " (p. " + e.page + ")").join("\n") || "(none)"));
+    part.append(el("div", { class: "meta" }, `Opening excerpt (page ${p.opening_page})`), el("pre", {}, p.opening || "(none)"));
+    box.append(part);
+  }
+}
 
 function detail(r) {
   const box = $("detail"); box.replaceChildren();

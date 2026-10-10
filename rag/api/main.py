@@ -59,6 +59,11 @@ class AskRequest(BaseModel):
     style: str = "standard"
 
 
+class AboutRequest(BaseModel):
+    question: str = Field(min_length=1, max_length=2000)
+    doc_ids: Optional[List[str]] = Field(None, max_length=50)  # null: every ready document you own
+
+
 class AskAcrossRequest(AskRequest):
     doc_ids: Optional[List[str]] = Field(None, max_length=50)  # null: every ready document you own
 
@@ -202,11 +207,15 @@ def create_app(
             raise HTTPException(404, "no such document")
 
     def answer_request(request: AskRequest, call: Callable[[], Dict[str, Any]], what: str) -> Dict[str, Any]:
-        """Validate the options, run the question, and map failures to HTTP errors. Shared by both ask routes."""
+        """Validate the options, run the question, and map failures to HTTP errors. Shared by the ask routes."""
         if request.config not in USABLE_CONFIGS:
             raise HTTPException(422, f"config must be one of {USABLE_CONFIGS}")
         if request.style not in ("standard", "spotlight"):
             raise HTTPException(422, "style must be standard or spotlight")
+        return guarded(call, what)
+
+    def guarded(call: Callable[[], Dict[str, Any]], what: str) -> Dict[str, Any]:
+        """Run a question and map its failures to HTTP errors."""
         try:
             return call()
         except NotFound:
@@ -231,6 +240,12 @@ def create_app(
         return answer_request(
             request, lambda: svc().ask_documents(owner, request.doc_ids, request.question, request.config, request.style),
             "several documents")
+
+    @v1.post("/ask-about")
+    def ask_about(request: AboutRequest, owner: str = Depends(current_owner)) -> Dict[str, Any]:
+        """Questions about the documents themselves (what they are, how they differ), answered from
+        their profiles. A separate route from /ask: the caller chooses it, nothing is routed."""
+        return guarded(lambda: svc().ask_about(owner, request.doc_ids, request.question), "about the documents")
 
     app.include_router(v1)
     return app

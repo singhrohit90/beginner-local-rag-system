@@ -301,3 +301,13 @@ The compose file turns the security plugin off, which is only acceptable because
 on 127.0.0.1. Stop it with `docker compose down` (add `-v` to delete the stored data).
 From this Windows machine the repository folder is not visible inside WSL, so start it with
 `cat docker-compose.yml | wsl -d Ubuntu-24.04 -- docker compose -f - up -d opensearch`.
+
+## Step 10: questions about the documents themselves
+
+    POST /v1/ask-about     {"question": "...", "doc_ids": [...] | null}
+
+"When should I use this book and when that one?" is about the documents, so no passage answers it. Each document
+gets a profile (`ingestion/profile.py`: name, pages, contents, the preface) written at upload, and
+`query/about.py` answers from the profiles of the chosen documents. It is a separate path that the caller picks
+on the page ("about the documents themselves"); the query pipeline and its prompt are unchanged. The design,
+the alternatives and the safety rules are in `docs/about_the_documents.md`.

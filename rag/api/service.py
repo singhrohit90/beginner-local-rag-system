@@ -26,9 +26,12 @@ from rag.common.chunk_store import ChunkStore, MemoryChunkStore, Scope
 from rag.ingestion.chunking.base import load_chunkset
 from rag.ingestion.index import get_index, index_document
 from rag.ingestion.pipeline import ingest
+from rag.ingestion.profile import PROFILE_FILE, PROFILE_VERSION, build_profile
+from rag.ingestion.extract import load_pages
 from rag.ingestion.sandbox import DEFAULT_MEMORY_MB, DEFAULT_TIMEOUT_SECONDS, extract_in_sandbox
+from rag.query.about import answer_about
 from rag.query.configs import CONFIGS
-from rag.query.guard import scan_chunks
+from rag.query.guard import filter_output, scan_chunks
 from rag.query.pipeline import RagPipeline, RetrievalPipeline
 from rag.query.rerank import Reranker
 
@@ -266,6 +269,7 @@ class DocumentService:
                 result = ingest(directory / "source.pdf", status["chunker"], self.embedder_spec,
                                 out_dir=directory, embedder=self.embedder, extractor=self._extract,
                                 on_stage=lambda name: self._write_status(doc_id, stage=name))
+            self._try_profile(doc_id, status)  # what the document is, for questions about the documents
             flagged = sum(r.flagged for r in scan_chunks(result.chunkset.chunks).values())
             self._write_status(doc_id, state="ready", stage=None, chunks=len(result.chunkset.chunks),
                                flagged_chunks=flagged)
@@ -283,6 +287,32 @@ class DocumentService:
                 self._remove_tree(self.root / doc_id)
                 self.store.delete_document(doc_id)
                 self._deleting.discard(doc_id)
+
+    def _try_profile(self, doc_id: str, status: Dict[str, Any]) -> None:
+        try:
+            self.profile(doc_id, status)
+        except NotFound:
+            raise
+        except Exception:  # a missing profile must not fail the upload; it is built again when first needed
+            logger.exception("could not build the profile of %s", doc_id)
+
+    def profile(self, doc_id: str, status: Dict[str, Any]) -> Dict[str, Any]:
+        """The document's profile, built from its extracted pages and contents list the first time
+        it is needed (uploads made before profiles existed get theirs then)."""
+        directory = self._dir(doc_id)
+        path = directory / PROFILE_FILE
+        if path.exists():
+            try:
+                stored = self._read_json(path)
+                if stored.get("version") == PROFILE_VERSION:
+                    return stored
+            except (OSError, ValueError):
+                pass  # damaged or from an older version: build it again
+        pages = load_pages(directory / "source.pages.jsonl")
+        toc = self._read_json(directory / "source.toc.json") if (directory / "source.toc.json").exists() else []
+        profile = build_profile(status["name"], pages, toc)
+        self._atomic_write(path, json.dumps(profile, indent=1))
+        return profile
 
     def _extract(self, pdf: Path, pages_path: Path, toc_path: Path) -> None:
         """PDF -> pages in a child process with a time and memory limit (see sandbox.py)."""
@@ -364,6 +394,27 @@ class DocumentService:
             parents[parent.chunk_id] = parent
         chunkset.parents = parents
         index_document(self.store, doc_id, status.get("owner", LOCAL_OWNER), chunkset, index)
+
+    def ask_about(self, owner: str, doc_ids: Optional[Sequence[str]], question: str) -> Dict[str, Any]:
+        """Answer a question about the documents themselves (what they are, how they differ) from their
+        profiles. No search is involved, and nothing is saved: the question names no passage to keep."""
+        statuses = self._ready_documents(owner, doc_ids)
+        started = time.perf_counter()
+        answer, _prompt, shown = answer_about(self.llm, question, [self.profile(s["id"], s) for s in statuses])
+        context = " ".join(f"{p['name']} {p['title_page']} {p['opening']}" for p in shown)
+        checked = filter_output(answer.text, context)  # the same output filter as every other answer
+        by_label = {p["label"]: s["id"] for p, s in zip(shown, statuses)}
+        return {
+            "query_id": f"about-{int(time.time() * 1000)}",
+            "answer": checked.answer,
+            "blocked": checked.reasons,
+            "abstained": False,
+            "citations": [f"D{n}" for n in answer.cited if f"D{n}" in by_label],
+            "documents": [{"id": s["id"], "name": s["name"], "label": p["label"]} for p, s in zip(shown, statuses)],
+            "profiles": shown,
+            "llm": self.llm.name,
+            "seconds": round(time.perf_counter() - started, 2),
+        }
 
     def ask(self, doc_id: str, owner: str, question: str, config: str = "weighted",
             style: str = "standard") -> Dict[str, Any]:
