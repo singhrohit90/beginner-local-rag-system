@@ -769,3 +769,92 @@ def test_the_page_script_has_valid_syntax(tmp_path):
     path.write_text(script, encoding="utf-8")
     check = subprocess.run([node, "--check", str(path)], capture_output=True, text=True)
     assert check.returncode == 0, check.stderr
+
+
+# ---- delete racing the lazy load into the store ------------------------------------------------
+
+import threading  # noqa: E402  (this block was added at the end of the file)
+
+from rag.common.chunk_store import MemoryChunkStore  # noqa: E402
+
+
+class _BlockingStore(MemoryChunkStore):
+    """upsert stops until the test releases it, so a load can be held inside the load lock."""
+
+    def __init__(self):
+        super().__init__()
+        self.entered = threading.Event()
+        self.release = threading.Event()
+
+    def upsert(self, *args, **kwargs):
+        self.entered.set()
+        assert self.release.wait(10)
+        super().upsert(*args, **kwargs)
+
+
+def _race_service(tmp_path, store):
+    service = DocumentService(root=tmp_path / "uploads", embedder=HashingEmbedder(), embedder_spec="hash",
+                              llm=FakeLLM(lambda system, user: "Replication keeps copies [1]."), store=store)
+    doc_id = service.create("a.pdf", make_pdf(REPLICATION), "local")["id"]
+    service.run_ingestion(doc_id)
+    return service, doc_id
+
+
+@pytest.mark.parametrize("doc_ids_of", [lambda doc_id: [doc_id], lambda doc_id: None], ids=["one document", "all documents"])
+def test_a_delete_during_a_load_leaves_nothing_in_the_store(tmp_path, doc_ids_of):
+    from rag.api.service import NotFound
+
+    store = _BlockingStore()
+    service, doc_id = _race_service(tmp_path, store)
+    outcome = []
+
+    def ask():
+        try:
+            outcome.append(service.ask_documents("local", doc_ids_of(doc_id), "What does replication do?"))
+        except NotFound as err:
+            outcome.append(err)
+
+    asker = threading.Thread(target=ask)
+    asker.start()
+    assert store.entered.wait(10)  # the loader is inside the load lock, about to write the chunks
+    deleter = threading.Thread(target=service.delete, args=(doc_id, "local"))
+    deleter.start()
+    deleter.join(0.5)  # the old code finishes the whole delete here, before the loader writes
+    store.release.set()
+    asker.join(20)
+    deleter.join(20)
+    assert not asker.is_alive() and not deleter.is_alive()
+    assert not store.has_document(doc_id)  # the loader's rows are gone
+    assert not (tmp_path / "uploads" / doc_id).exists()
+    assert len(outcome) == 1  # the question succeeded or was refused as NotFound, nothing else
+    assert doc_id not in service._deleting  # the mark is not kept once the folder is gone
+
+
+def test_a_question_after_a_delete_is_not_found_and_loads_nothing(tmp_path):
+    from rag.api.service import NotFound
+
+    store = _BlockingStore()
+    store.release.set()
+    service, doc_id = _race_service(tmp_path, store)
+    service.delete(doc_id, "local")
+    with pytest.raises(NotFound):
+        service.ask_documents("local", [doc_id], "What does replication do?")
+    assert not store.entered.is_set() and not store.has_document(doc_id)
+
+
+def test_a_load_that_finds_the_document_deleted_afterwards_removes_its_rows(tmp_path):
+    """The second line of defence: whatever order things happen in, no rows are left behind."""
+    from rag.api.service import NotFound
+
+    service, doc_id = _race_service(tmp_path, MemoryChunkStore())
+    status = service.get(doc_id, "local")
+    original = service.store.upsert
+
+    def upsert_then_lose_the_folder(*args, **kwargs):
+        original(*args, **kwargs)
+        service._remove_tree(tmp_path / "uploads" / doc_id)
+
+    service.store.upsert = upsert_then_lose_the_folder
+    with pytest.raises(NotFound):
+        service._load_into_store(doc_id, status)
+    assert not service.store.has_document(doc_id)

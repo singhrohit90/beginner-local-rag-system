@@ -41,6 +41,9 @@ DEFAULT_MAX_UPLOAD_BYTES = 50 * 1024 * 1024
 DEFAULT_MAX_PAGES = 2000  # the DDIA book is about 600 pages
 LOCAL_OWNER = "local"  # the owner until real users arrive, and of any upload made before owners existed
 STATES = ("queued", "processing", "ready", "failed")
+# A profile in the prompt is up to about 8,000 characters (title page, opening pages, contents), so 20
+# documents is about 160,000 characters, roughly 40,000 tokens: large, but within the model's window.
+MAX_ABOUT_DOCUMENTS = 20
 
 
 class NotFound(Exception):
@@ -344,10 +347,15 @@ class DocumentService:
     def delete(self, doc_id: str, owner: str) -> None:
         self.get(doc_id, owner)  # NotFound unless it is this owner's
         directory = self._dir(doc_id)
-        if doc_id in self._running:  # the ingestion thread finishes the cleanup when it stops
+        # A question may be loading this document into the store right now. Waiting for the load lock lets
+        # that load finish first, so delete_document removes what it wrote; a load that starts later
+        # finds the id in _deleting and is refused.
+        with self._load_lock:
             self._deleting.add(doc_id)
-        self.store.delete_document(doc_id)
+            self.store.delete_document(doc_id)
         self._remove_tree(directory)
+        if doc_id not in self._running:  # otherwise the ingestion thread finishes the cleanup when it stops
+            self._deleting.discard(doc_id)
 
     # ---- asking -------------------------------------------------------------------------
 
@@ -394,11 +402,17 @@ class DocumentService:
             parents[parent.chunk_id] = parent
         chunkset.parents = parents
         index_document(self.store, doc_id, status.get("owner", LOCAL_OWNER), chunkset, index)
+        if doc_id in self._deleting or not directory.is_dir():  # deleted while loading: leave nothing behind
+            self.store.delete_document(doc_id)
+            raise NotFound(doc_id)
 
     def ask_about(self, owner: str, doc_ids: Optional[Sequence[str]], question: str) -> Dict[str, Any]:
         """Answer a question about the documents themselves (what they are, how they differ) from their
         profiles. No search is involved, and nothing is saved: the question names no passage to keep."""
         statuses = self._ready_documents(owner, doc_ids)
+        if len(statuses) > MAX_ABOUT_DOCUMENTS:  # every profile goes into one prompt, so the prompt must stay bounded
+            raise BadUpload(f"choose at most {MAX_ABOUT_DOCUMENTS} documents for a question about the documents "
+                            f"(you chose {len(statuses)})")
         started = time.perf_counter()
         answer, _prompt, shown = answer_about(self.llm, question, [self.profile(s["id"], s) for s in statuses])
         context = " ".join(f"{p['name']} {p['title_page']} {p['opening']}" for p in shown)
@@ -446,8 +460,8 @@ class DocumentService:
             # one document could not remove them.
             try:
                 trace.save(self._dir(info["first"]) / "chat")
-            except NotFound:
-                pass  # deleted while the model was answering
+            except (NotFound, FileNotFoundError):
+                pass  # deleted while the model was answering (or while the trace was being written)
         usage = trace.config.get("usage", {})
         context = trace.stage("context").hits
         return {
