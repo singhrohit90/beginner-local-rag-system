@@ -156,6 +156,13 @@ def create_app(
         return {"ok": True, "ready": state["service"] is not None, "chunkers": list(STRATEGIES),
                 "configs": USABLE_CONFIGS}
 
+    @v1.get("/status")
+    async def status(owner: str = Depends(current_owner)) -> Dict[str, Any]:
+        """For the page's light: is the model server reachable, is the database up."""
+        if state["service"] is None:  # still loading: report that, do not wait for it
+            return {"models_loaded": False, "llm": None, "search": None}
+        return await run_in_threadpool(state["service"].status)
+
     @v1.post("/documents", status_code=202)
     async def upload(background: BackgroundTasks, file: UploadFile = File(...),
                      chunker: str = Form("recursive"), owner: str = Depends(current_owner)) -> Dict[str, Any]:

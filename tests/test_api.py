@@ -691,3 +691,81 @@ def test_the_page_shows_skeleton_rows_and_waits_for_the_models(tmp_path):
     page = client.get("/").text
     assert "function skeletonRows" in page and "skeleton" in page
     assert "checkReady" in page and 'id="starting"' in page and "const can = ready &&" in page
+
+
+class _Offering:
+    """A model client that can list its models, like the real server client."""
+
+    name = "vllm:/models/test"
+    _model = "/models/test"
+
+    def __init__(self, offered=None, error=None):
+        self._offered, self._error = offered, error
+
+    def list_models(self):
+        if self._error:
+            raise self._error
+        return self._offered
+
+
+def test_status_reports_a_reachable_model_server(tmp_path):
+    client, service = make_client(tmp_path)
+    service.llm = _Offering(offered=["/models/test"])
+    body = client.get("/v1/status").json()
+    assert body["models_loaded"] is True and body["llm"]["ok"] is True and body["search"]["ok"] is True
+    assert "/models/test" in body["llm"]["detail"] and body["llm"]["name"] == "vllm:/models/test"
+
+
+def test_status_reports_an_unreachable_model_server_without_its_address(tmp_path):
+    client, service = make_client(tmp_path)
+    service.llm = _Offering(error=ConnectionError("cannot reach the model server at http://10.1.2.3:30007/v1"))
+    llm = client.get("/v1/status").json()["llm"]
+    assert llm["ok"] is False and "cannot reach the model server" in llm["detail"] and "10.1.2.3" not in llm["detail"]
+
+
+def test_status_notices_a_model_the_server_does_not_offer(tmp_path):
+    client, service = make_client(tmp_path)
+    service.llm = _Offering(offered=["/models/other"])
+    llm = client.get("/v1/status").json()["llm"]
+    assert llm["ok"] is False and "does not offer" in llm["detail"]
+
+
+def test_status_does_not_wait_for_a_silent_server(tmp_path):
+    import time
+
+    def silent():
+        time.sleep(30)
+
+    result = DocumentService._probe(silent, seconds=0.3)
+    assert result["ok"] is False and result["detail"].startswith("no answer within")
+
+
+def test_status_before_the_models_load_does_not_build_them(tmp_path):
+    def not_built():
+        raise AssertionError("status must not load the models")
+
+    cold = TestClient(create_app(service_factory=not_built, allowed_hosts=("testserver",), warm_up=False))
+    assert cold.get("/v1/status").json() == {"models_loaded": False, "llm": None, "search": None}
+
+
+def test_the_page_has_a_light_that_shows_the_details_on_hover(tmp_path):
+    client, _ = make_client(tmp_path)
+    page = client.get("/").text
+    assert 'id="light"' in page and "function checkStatus" in page and "/v1/status" in page
+    assert '$("status").title' in page and "click to check again" in page
+
+
+def test_the_page_script_has_valid_syntax(tmp_path):
+    import re
+    import shutil
+    import subprocess
+
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is not installed")
+    client, _ = make_client(tmp_path)
+    script = re.search(r"<script>(.*)</script>", client.get("/").text, re.S).group(1)
+    path = tmp_path / "page.js"
+    path.write_text(script, encoding="utf-8")
+    check = subprocess.run([node, "--check", str(path)], capture_output=True, text=True)
+    assert check.returncode == 0, check.stderr

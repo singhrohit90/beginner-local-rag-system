@@ -181,6 +181,49 @@ class DocumentService:
                     continue  # not this owner's, deleted, or not yet written, while we were listing
         return sorted(found, key=lambda s: s.get("created", 0), reverse=True)
 
+    # ---- health -------------------------------------------------------------------------
+
+    @staticmethod
+    def _probe(check, seconds: float = 3.0) -> Dict[str, Any]:
+        """Run check() -> detail text with a time limit. A failure or a silence is reported, not raised."""
+        outcome: Dict[str, Any] = {}
+
+        def run() -> None:
+            try:
+                outcome["detail"] = check()
+            except Exception as err:
+                outcome["error"] = DocumentService._public_error(err)
+
+        worker = threading.Thread(target=run, daemon=True)
+        worker.start()
+        worker.join(seconds)
+        if worker.is_alive():
+            return {"ok": False, "detail": f"no answer within {int(seconds)} seconds"}
+        if "error" in outcome:
+            return {"ok": False, "detail": outcome["error"]}
+        return {"ok": True, "detail": outcome["detail"]}
+
+    def status(self) -> Dict[str, Any]:
+        """Is the model server reachable and is the search database up? Cheap: the model check only
+        asks which models the server offers, it does not generate anything."""
+        def model() -> str:
+            offered = getattr(self.llm, "list_models", None)
+            if offered is None:
+                return "no connection to check for this model"
+            wanted = getattr(self.llm, "_model", None)
+            models = offered()
+            if wanted is not None and wanted not in models:
+                raise RuntimeError(f"the server answers but does not offer {wanted}")
+            return f"the server answers and offers {wanted}"
+
+        def search() -> str:
+            ping = getattr(self.store, "ping", None)
+            return "in memory, no database" if ping is None else f"cluster health: {ping()}"
+
+        return {"models_loaded": True,
+                "llm": {"name": self.llm.name, **self._probe(model)},
+                "search": self._probe(search)}
+
     # ---- upload and ingestion -----------------------------------------------------------
 
     def create(self, filename: str, data: bytes, owner: str, chunker: str = "recursive") -> Dict[str, Any]:

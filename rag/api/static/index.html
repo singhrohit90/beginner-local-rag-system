@@ -38,6 +38,10 @@
   .skeleton .bar { height: 12px; border-radius: 4px; margin: 6px 0; background: linear-gradient(90deg, var(--line) 25%, var(--bg) 50%, var(--line) 75%); background-size: 200% 100%; animation: shimmer 1.2s infinite linear; }
   .skeleton .bar.short { width: 55%; }
   @keyframes shimmer { from { background-position: 200% 0; } to { background-position: -200% 0; } }
+  .head { display: flex; justify-content: space-between; align-items: center; }
+  #status { display: flex; align-items: center; gap: 6px; cursor: help; }
+  .light { display: inline-block; width: 11px; height: 11px; border-radius: 50%; background: var(--muted); }
+  .light.green { background: var(--good); } .light.amber { background: var(--warn); } .light.red { background: var(--bad); }
   #starting { color: var(--warn); margin-bottom: 8px; }
   button.more { padding: 0 8px; font-size: 12px; }
   button, select { padding: 7px 12px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); color: var(--text); cursor: pointer; }
@@ -72,7 +76,12 @@
   </section>
 
   <section id="chat">
-    <h2 id="title">Select or upload a document</h2>
+    <div class="head">
+      <h2 id="title">Select or upload a document</h2>
+      <span id="status" tabindex="0" role="status" title="Checking...">
+        <span id="light" class="light"></span><small id="statusText" class="meta">checking</small>
+      </span>
+    </div>
     <div id="log"></div>
     <div id="error"></div>
     <form class="ask" id="ask">
@@ -227,7 +236,7 @@ $("ask").onsubmit = async (e) => {
   } catch (err) {
     showError(err.message);
     const failed = el("div", { class: "msg a" }, el("span", { class: "tag bad" }, "no answer"), el("br"), longText(err.message));
-    $("log").append(failed); failed.scrollIntoView();  // the question stays in the log with its failure beside it
+    $("log").append(failed); failed.scrollIntoView(); checkStatus();  // the question stays in the log with its failure beside it
   }
   $("send").disabled = false; $("question").focus();
 };
@@ -264,8 +273,31 @@ async function checkReady() {
   if (!ready) setTimeout(checkReady, 1500);
 }
 
+// The light: green = model server and database answer, amber = models still loading, red = something does not answer.
+// Hover (or focus) shows the details; clicking checks again.
+let statusTimer = null;
+async function checkStatus() {
+  clearTimeout(statusTimer);
+  let s = null, color = "amber", label = "checking", lines = [];
+  try { s = await api("/v1/status"); } catch (err) { color = "red"; label = "server not answering"; lines = [err.message]; }
+  if (s && !s.models_loaded) { label = "loading models"; lines = ["The server is loading its models; this happens once after each restart."]; }
+  else if (s) {
+    const bad = !s.llm.ok || !s.search.ok;
+    color = bad ? "red" : "green";
+    label = !s.llm.ok ? "model server not reachable" : !s.search.ok ? "database not reachable" : "model connected";
+    lines = [`Model server: ${s.llm.ok ? "working" : "NOT working"} (${s.llm.name})`, `  ${s.llm.detail}`,
+             `Search database: ${s.search.ok ? "working" : "NOT working"}`, `  ${s.search.detail}`];
+  }
+  $("light").className = "light " + color;
+  $("statusText").textContent = label;
+  $("status").title = lines.join("\n") + "\n(click to check again)";
+  statusTimer = setTimeout(checkStatus, color === "green" ? 15000 : 3000);
+}
+$("status").onclick = checkStatus;
+
 skeletonRows();
 checkReady();
+checkStatus();
 refresh().then(updateChat).catch((err) => { $("docs").replaceChildren(); showError(err.message); });
 </script>
 </body>

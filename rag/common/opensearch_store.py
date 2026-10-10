@@ -54,6 +54,10 @@ class OpenSearchChunkStore:
         self._documents = f"{prefix}_d_{self._slug}"
         self._ensure_documents_index()
 
+    def ping(self) -> str:
+        """The cluster's health colour ("green", "yellow", "red"); raises if the server does not answer."""
+        return self._client.cluster.health(params={"request_timeout": 2})["status"]
+
     # ---- index names and setup ----------------------------------------------------------
 
     def _owner_key(self, owner: str) -> str:
