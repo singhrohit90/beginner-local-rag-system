@@ -16,6 +16,7 @@ Revision notes for RAG and applied-ML interviews, built from what was actually b
 | [`01_retrieval_and_chunking.md`](01_retrieval_and_chunking.md) | Chunking strategies, embeddings, dense vs BM25 vs hybrid, fusion (RRF and weighted), reranking, hit@k, recall, MRR, nDCG, diagnosing retrieval failures, vector store design, exact vs approximate search, stemming |
 | [`02_generation_and_evaluation.md`](02_generation_and_evaluation.md) | Evaluating a RAG system end to end, the golden set, faithfulness, correctness, relevance, LLM-as-judge and its biases, the noise band, prompts, citations, abstention, reasoning models, caching and privacy |
 | [`03_security.md`](03_security.md) | Prompt injection (direct and indirect), the layered defence and its measured results, markdown exfiltration, output filtering and its limits, tenant isolation, upload safety, MCP risks, how security was tested |
+| [`05_conversation_memory_and_cost.md`](05_conversation_memory_and_cost.md) | Follow-up questions ("What is its population?") and query rewriting, compacting a long conversation, tracking token cost and latency, Langfuse and LangSmith; **all three are not built here, the file is the design plus what exists** |
 | [`04_system_design_and_streaming.md`](04_system_design_and_streaming.md) | Architecture, why plain Python, API design, deployment and scaling, cold start, health checks, **streaming and validating a streamed answer (including what cannot be undone)**, a story about finding a limit by using the product, decisions and what was rejected, what is not done |
 
 ## The 60-second pitch
@@ -63,6 +64,11 @@ Format: question, one-line answer, then where to look.
 - *Layers here?* Scanner on passages, production system prompt, optional spotlighting, exact-copy drop and per-source cap, output filter. Result with the defaults: 0 of 10 fixtures obeyed, but be precise: the scanner removed 7 of the 10 poisoned documents, so only 3 reached the model, and none of those 3 was obeyed (the production prompt alone: 3 of 10 obeyed at 1 copy, 2 at 3 copies; a naive prompt: 5). → `03`; `runs/security__indirect__vllm-models-gpt-oss-20b__copies1/report.json`.
 - *Markdown exfiltration?* A poisoned document makes the model write an image whose address carries private data; the client's render makes the request. The fix is on the display side: no images from untrusted domains, an image proxy and an allow-list. → `03`, `04` section 8; `docs/mcp_risks.md`.
 - *Why 404 and not 403 for another user's document?* A 403 confirms it exists. → `03`; `rag/api/main.py`.
+
+**Conversation and cost** (design, not built here)
+- *How does the model know what "it" means in a follow-up?* It does not; it is stateless. Send the history, and rewrite the follow-up into a standalone question before searching; ask when two readings are equally likely. → `05`, section 1.
+- *How do you compact a long conversation?* Recent turns verbatim, older turns as a running summary, key facts kept separately, re-fetchable text dropped, raw log kept. → `05`, section 2.
+- *How do you track token cost?* Per request: model, prompt, completion and hidden reasoning tokens, latency, user; cost = tokens x price (GPU time if self-hosted); aggregate and alert; use Langfuse or LangSmith. What exists here: token counts and stage timings per question in the trace. → `05`, section 3.
 
 **System**
 - *Streaming and a failed final check?* You cannot unsend. Hold back risky pieces until judged, render safely, then replace the text with the checked answer. → `04`, section 8.
