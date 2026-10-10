@@ -192,7 +192,9 @@ def create_app(
         except Exception as err:  # most often the model server being unreachable
             logger.exception("ask failed for %s", what)
             # the caller gets the reason without internal addresses; the full error is in the server log
-            reason = re.sub(r"https?://\S+", "<url>", str(err))[:200]
+            reason = re.sub(r"https?://\S+", "<url>", str(err))
+            if len(reason) > 500:  # a long message is cut at a word and says so, never mid-sentence
+                reason = reason[:500].rsplit(" ", 1)[0] + " ..."
             raise HTTPException(502, f"{type(err).__name__}: {reason}")
 
     @v1.post("/documents/{doc_id}/ask")

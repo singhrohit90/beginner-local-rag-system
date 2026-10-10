@@ -625,3 +625,29 @@ def test_failure_reasons_hide_paths_with_spaces_and_relative_paths(tmp_path):
                     "cannot open /var/lib/my app/idx"]:
         text = DocumentService._public_error(OSError(message))
         assert not any(bit in text for bit in ("Smith", "uploads", "C:/", "/var", "app/idx", "data")), text
+
+
+def test_a_long_model_error_is_not_cut_in_the_middle_of_a_sentence(tmp_path):
+    def broken(system, user):
+        raise RuntimeError("cannot reach the model server at http://10.1.2.3:30007/v1 " + "word " * 60 + "end of explanation.")
+
+    client, _ = make_client(tmp_path, llm=FakeLLM(broken))
+    doc_id = upload(client, make_pdf(REPLICATION)).json()["id"]
+    detail = client.post(f"/v1/documents/{doc_id}/ask", json={"question": "replication"}).json()["detail"]
+    assert "10.1.2.3" not in detail and "end of explanation." in detail  # about 370 characters, shown whole (the old limit was 200)
+
+    def very_long(system, user):
+        raise RuntimeError("word " * 400)
+
+    client, _ = make_client(tmp_path / "b", llm=FakeLLM(very_long))
+    doc_id = upload(client, make_pdf(REPLICATION)).json()["id"]
+    detail = client.post(f"/v1/documents/{doc_id}/ask", json={"question": "replication"}).json()["detail"]
+    assert detail.endswith(" ...") and len(detail) < 560
+
+
+def test_choosing_another_document_keeps_the_conversation_on_the_page(tmp_path):
+    client, _ = make_client(tmp_path)
+    page = client.get("/").text
+    select_function = page[page.index("function select("):page.index("function scopeLabel")]
+    assert "replaceChildren" not in select_function  # the log is not cleared when the selection changes
+    assert "asked of:" in page and "no answer" in page

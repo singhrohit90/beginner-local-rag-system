@@ -144,7 +144,13 @@ function schedulePoll() {
   poll = setTimeout(() => refresh().then(updateChat).catch((err) => { showError(err.message); schedulePoll(); }), 2000);
 }
 
-function select(id) { selected = id; $("log").replaceChildren(); $("detail").textContent = "Click an answer to see its passages and stage timings."; refresh().then(updateChat); }
+// Choosing another document keeps the conversation: each question says which documents it went to.
+function select(id) { selected = id; refresh().then(updateChat); }
+
+function scopeLabel() {
+  const scope = $("scope").value, d = docs.find((x) => x.id === selected);
+  return scope === "all" ? "all my documents" : scope === "checked" ? `${checked.size} checked document(s)` : d ? d.name : "";
+}
 
 function targets() {
   // the document ids a question goes to: null means every ready document, [] means nothing to ask
@@ -181,7 +187,8 @@ $("ask").onsubmit = async (e) => {
   e.preventDefault(); showError("");
   const question = $("question").value.trim(); const ids = targets(); if (!question || (ids !== null && !ids.length)) return;
   $("question").value = ""; $("send").disabled = true;
-  $("log").append(el("div", { class: "msg q" }, question));
+  const asked = el("div", { class: "msg q" }, question, el("br"), el("small", { class: "meta" }, "asked of: " + scopeLabel()));
+  $("log").append(asked);
   try {
     const r = await api("/v1/ask", { method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ question, doc_ids: ids, config: $("config").value }) });
@@ -191,7 +198,11 @@ $("ask").onsubmit = async (e) => {
     if (r.abstained) msg.prepend(el("span", { class: "tag warn" }, "abstained"), el("br"));
     msg.onclick = () => { document.querySelectorAll(".a").forEach((n) => n.classList.remove("sel")); msg.classList.add("sel"); detail(r); };
     $("log").append(msg); msg.click(); msg.scrollIntoView();
-  } catch (err) { showError(err.message); }
+  } catch (err) {
+    showError(err.message);
+    const failed = el("div", { class: "msg a" }, el("span", { class: "tag bad" }, "no answer"), el("br"), err.message);
+    $("log").append(failed); failed.scrollIntoView();  // the question stays in the log with its failure beside it
+  }
   $("send").disabled = false; $("question").focus();
 };
 
