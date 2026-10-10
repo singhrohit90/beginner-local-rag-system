@@ -29,6 +29,18 @@ class _Server:
                 body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
                 outer.payloads.append(body)
                 script = outer.scripts.pop(0)
+                if script and script[0][0] == "status":  # an error status instead of a stream: ("status", 503)
+                    self.send_response(script[0][1])
+                    self.end_headers()
+                    return
+                if script and script[0][0] == "json":  # an ordinary (not streamed) reply: ("json", {...})
+                    data = json.dumps(script[0][1]).encode()
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(data)))
+                    self.end_headers()
+                    self.wfile.write(data)
+                    return
                 self.send_response(200)
                 self.send_header("Content-Type", "text/event-stream")
                 self.end_headers()
@@ -160,3 +172,56 @@ def test_the_fake_model_streams_in_four_character_pieces():
     pieces = list(FakeLLM(lambda s, u: "abcdefghij").generate_stream("s", "u"))
     assert [p.text for p in pieces[:-1]] == ["abcd", "efgh", "ij"] and pieces[-1].result.text == "abcdefghij"
     assert isinstance(pieces[0], StreamPiece)
+
+
+# ---- fixes from the ultrareview of the streaming work ---------------------------------------------
+
+def test_an_error_object_inside_the_stream_is_a_failure_not_a_finished_answer(served):
+    # what vLLM sends when generation fails after the stream has started: an error object, then [DONE]
+    _, llm = served([chunk(content="The beginning of an ans"), event(error={"message": "engine error", "code": 500}), DONE])
+    with pytest.raises(RuntimeError, match="reported an error while answering"):
+        collect(llm)
+
+
+def test_the_older_error_shape_is_a_failure_too(served):
+    _, llm = served([event(object="error", message="out of memory", code=500), DONE])
+    with pytest.raises(RuntimeError, match="reported an error"):
+        collect(llm)
+
+
+def test_done_without_a_finish_reason_is_not_a_complete_answer(served):
+    _, llm = served([chunk(content="half an answer"), DONE])  # the server ends the stream but never says it finished
+    with pytest.raises(RuntimeError, match="without a finish reason"):
+        collect(llm)
+
+
+def test_both_kinds_of_call_retry_a_busy_server_the_same_way(served, monkeypatch):
+    monkeypatch.setattr("rag.common.llm.time.sleep", lambda seconds: None)
+    reply = {"choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}], "usage": {"prompt_tokens": 1, "completion_tokens": 1}}
+    server, llm = served([("status", 503)], [("json", reply)])
+    llm._retries = 1
+    assert llm.generate("s", "u", 50).text == "ok"  # the ordinary call: one 503, then success
+    assert len(server.payloads) == 2
+
+    server, llm = served([("status", 503)], [chunk(content="ok"), chunk(finish="stop"), DONE])
+    llm._retries = 1
+    texts, result = collect(llm)  # the streaming call retries the opening in exactly the same way
+    assert texts == ["ok"] and result.finish_reason == "stop" and len(server.payloads) == 2
+
+
+def test_a_refused_connection_is_final_for_both_kinds_of_call(monkeypatch):
+    import urllib.error
+
+    calls = []
+
+    def refuse(request, timeout=None):
+        calls.append(request.full_url)
+        raise urllib.error.URLError(ConnectionRefusedError(10061, "actively refused"))
+
+    monkeypatch.setattr("rag.common.llm.urllib.request.urlopen", refuse)
+    monkeypatch.setattr("rag.common.llm.time.sleep", lambda seconds: pytest.fail("a dead tunnel must not be retried"))
+    llm = OpenAICompatLLM("m", base_url="http://127.0.0.1:1/v1", retries=3, timeout=2)
+    for call in (lambda: llm.generate("s", "u", 50), lambda: list(llm.generate_stream("s", "u", 50))):
+        with pytest.raises(RuntimeError, match="cannot reach the model server"):
+            call()
+    assert len(calls) == 2  # one attempt per call, not four

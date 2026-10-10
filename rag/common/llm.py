@@ -230,14 +230,14 @@ class OpenAICompatLLM:
             raise self._unreachable(url, err.reason if hasattr(err, "reason") else err) from err
         return [m.get("id", "") for m in data.get("data", [])]
 
-    def _post(self, payload: dict) -> dict:
-        url = f"{self._base}/chat/completions"
-        request = urllib.request.Request(url, json.dumps(payload).encode(), self._headers())
+    def _with_retries(self, url: str, action):
+        """Run action(), which makes one request to the model server, with the retries, the backoff and
+        the error messages every call to it shares: a refused connection is final (a dead tunnel will not
+        recover), a 429 or 5xx or a timeout is retried, anything else is reported."""
         delay = 2.0
         for attempt in range(self._retries + 1):
             try:
-                with urllib.request.urlopen(request, timeout=self._timeout) as response:
-                    return json.loads(response.read())
+                return action()
             except urllib.error.HTTPError as err:
                 retryable = err.code in (429, 500, 502, 503, 504)
                 if not retryable or attempt == self._retries:
@@ -257,33 +257,22 @@ class OpenAICompatLLM:
             delay = min(delay * 2, 30)
         raise RuntimeError("unreachable")
 
+    def _post(self, payload: dict) -> dict:
+        url = f"{self._base}/chat/completions"
+        request = urllib.request.Request(url, json.dumps(payload).encode(), self._headers())
+
+        def send() -> dict:
+            with urllib.request.urlopen(request, timeout=self._timeout) as response:
+                return json.loads(response.read())
+
+        return self._with_retries(url, send)
+
     def _open_stream(self, payload: dict):
         """Open the streaming request, with the same retries and messages as _post. Only the opening
         is retried: once text has been sent on, a failure is reported, not repeated."""
         url = f"{self._base}/chat/completions"
         request = urllib.request.Request(url, json.dumps(payload).encode(), self._headers())
-        delay = 2.0
-        for attempt in range(self._retries + 1):
-            try:
-                return urllib.request.urlopen(request, timeout=self._timeout)
-            except urllib.error.HTTPError as err:
-                retryable = err.code in (429, 500, 502, 503, 504)
-                if not retryable or attempt == self._retries:
-                    body = err.read().decode("utf-8", "replace")[:300]
-                    raise RuntimeError(f"model server returned HTTP {err.code}: {body}") from err
-            except urllib.error.URLError as err:
-                reason = getattr(err, "reason", err)
-                if isinstance(reason, ConnectionRefusedError) or "refused" in str(reason).lower():
-                    raise self._unreachable(url, reason) from err  # a dead tunnel will not recover
-                if attempt == self._retries:
-                    raise self._unreachable(url, reason) from err
-            except TimeoutError:
-                if attempt == self._retries:
-                    raise RuntimeError(f"model server did not answer within {self._timeout:.0f}s")
-            logger.warning("model server error, retrying in %.0fs", delay)
-            time.sleep(delay)
-            delay = min(delay * 2, 30)
-        raise RuntimeError("unreachable")
+        return self._with_retries(url, lambda: urllib.request.urlopen(request, timeout=self._timeout))
 
     def generate_stream(self, system: str, user: str, max_output_tokens: int = 1024) -> Iterator[StreamPiece]:
         """Like generate, but yields the answer as it is written: StreamPiece(text=...) for each piece,
@@ -307,7 +296,7 @@ class OpenAICompatLLM:
             response = self._open_stream(payload)
             parts: List[str] = []
             thinking: List[str] = []
-            finish, usage, ended = "", {}, False
+            finish, usage = "", {}
             try:
                 for raw in response:
                     line = raw.decode("utf-8", "replace").strip()
@@ -315,12 +304,16 @@ class OpenAICompatLLM:
                         continue  # blank separators and comments
                     data = line[5:].strip()
                     if data == "[DONE]":
-                        ended = True
                         break
                     try:
                         chunk = json.loads(data)
                     except ValueError:
                         continue
+                    if chunk.get("error") or chunk.get("object") == "error":
+                        # vLLM reports a failure that happens while generating as an error object in the
+                        # stream (no "choices"), followed by [DONE]; it is not a finished answer.
+                        raise RuntimeError(
+                            f"the model server reported an error while answering: {str(chunk.get('error') or chunk)[:300]}")
                     usage = chunk.get("usage") or usage
                     for choice in chunk.get("choices") or []:
                         delta = choice.get("delta") or {}
@@ -333,9 +326,8 @@ class OpenAICompatLLM:
                             thinking.append(think)
                         if choice.get("finish_reason"):
                             finish = str(choice["finish_reason"])
-                            ended = True
-                if not ended:  # the connection closed with no finish reason: a cut-off answer, not a complete one
-                    raise RuntimeError("the model server stopped answering part-way (the stream ended early)")
+                if not finish:  # [DONE] or a closed connection with no finish reason: a cut-off answer, not a complete one
+                    raise RuntimeError("the model server stopped answering part-way (the stream ended without a finish reason)")
             except (OSError, http.client.HTTPException) as err:  # the connection dropped part-way
                 raise RuntimeError(f"the model server stopped answering part-way ({err})") from err
             finally:
