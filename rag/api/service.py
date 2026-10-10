@@ -320,14 +320,18 @@ class DocumentService:
                            max_pages=self.max_pages)
 
     @staticmethod
-    def _public_error(err: Exception) -> str:
-        """The reason shown to the owner. File paths and URLs inside an error message describe the
-        server, so they are replaced; the full text stays in the server log."""
+    def _public_error(err: Exception, limit: int = 1500) -> str:
+        """The reason shown to a caller, for every failure the API reports (a failed upload, a failed
+        question, a failed stream). File paths and URLs inside an error message describe the server, so
+        they are replaced; the full text stays in the server log. A message over `limit` characters is
+        cut at a word and ends with "...", so the page can fold it instead of showing a wall of text."""
         text = str(err) or "no details, see the server log"
         text = re.sub(r"[A-Za-z][A-Za-z0-9+.-]*://\S+", "<url>", text)
         text = re.sub(r"[A-Za-z]:[\\/][^'\"\r\n]*", "<path>", text)  # a Windows path, which may hold spaces
         text = re.sub(r"\S*[\\/]\S*", "<path>", text)  # any other word with a separator in it
-        return f"{type(err).__name__}: {text[:1500]}"
+        if len(text) > limit:
+            text = text[:limit].rsplit(" ", 1)[0] + " ..."
+        return f"{type(err).__name__}: {text}"
 
     @staticmethod
     def _remove_tree(path: Path) -> None:

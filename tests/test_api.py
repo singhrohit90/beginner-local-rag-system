@@ -745,7 +745,7 @@ def test_status_before_the_models_load_does_not_build_them(tmp_path):
         raise AssertionError("status must not load the models")
 
     cold = TestClient(create_app(service_factory=not_built, allowed_hosts=("testserver",), warm_up=False))
-    assert cold.get("/v1/status").json() == {"models_loaded": False, "llm": None, "search": None}
+    assert cold.get("/v1/status").json() == {"models_loaded": False, "llm": None, "search": None, "error": None}
 
 
 def test_the_page_has_a_light_that_shows_the_details_on_hover(tmp_path):

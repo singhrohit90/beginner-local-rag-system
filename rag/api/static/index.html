@@ -337,9 +337,13 @@ function skeletonRows(count = 3) {
 }
 
 // The server loads its models in the background after a start; questions wait until it says it is ready.
+const LOADING_TEXT = $("starting").textContent;
 async function checkReady() {
-  try { ready = (await api("/v1/health")).ready; } catch (_) { ready = false; }
+  let h = null;
+  try { h = await api("/v1/health"); ready = h.ready; } catch (_) { ready = false; }
   $("starting").hidden = ready;
+  // If the start failed (the database is not up yet, a bad setting), say why while the server keeps trying.
+  $("starting").replaceChildren(h && h.error ? el("span", {}, "Could not start yet, trying again: ", longText(h.error)) : LOADING_TEXT);
   updateChat();
   if (!ready) setTimeout(checkReady, 1500);
 }
@@ -351,7 +355,8 @@ async function checkStatus() {
   clearTimeout(statusTimer);
   let s = null, color = "amber", label = "checking", lines = [];
   try { s = await api("/v1/status"); } catch (err) { color = "red"; label = "server not answering"; lines = [err.message]; }
-  if (s && !s.models_loaded) { label = "loading models"; lines = ["The server is loading its models; this happens once after each restart."]; }
+  if (s && !s.models_loaded && s.error) { color = "red"; label = "could not start"; lines = ["The server could not load its models and is trying again:", "  " + s.error]; }
+  else if (s && !s.models_loaded) { label = "loading models"; lines = ["The server is loading its models; this happens once after each restart."]; }
   else if (s) {
     const bad = !s.llm.ok || !s.search.ok;
     color = bad ? "red" : "green";
