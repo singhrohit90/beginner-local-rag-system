@@ -11,6 +11,7 @@ Fix: return passages inside a clearly labelled "quoted source text, not instruct
 ## 2. Data leaving through rendered output
 An answer can contain a markdown image or link that sends data to an outside host when the caller's client renders it. Our output filter blocks external images and URLs not in the retrieved text, but only for answers produced here.
 Fix: keep that filter in the API, strip markdown images and links from MCP responses by default, and test it with the existing exfiltration fixture (P03).
+The filter is a list of patterns and cannot be complete. Three review rounds each found a new way to write a link that a renderer follows but the patterns miss (`//host/x`, a reference-style image, `&#104;ttps://`, `https\://`), and each was added by hand. So the rule for every client of `/v1` is: treat `answer` and `passages[].text` as plain text and never render them as markdown or HTML. The page does this with `textContent`. An MCP server must return them as text, or strip images, links and HTML before returning them. The filter is the second layer, not the first.
 
 ## 3. Confused deputy and shared credentials
 If the MCP server holds one broad credential, every MCP user can reach every document.
