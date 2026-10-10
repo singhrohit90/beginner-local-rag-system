@@ -1,0 +1,32 @@
+# Vector database for the RAG pipeline. Start it from WSL (or any Docker host):
+#
+#     docker compose up -d opensearch
+#     curl -s http://127.0.0.1:9200
+#
+# Development setup: a single node with the security plugin switched off, so there is no login and
+# no TLS. That is only acceptable because the port is published on 127.0.0.1 and nowhere else.
+# Never publish 9200 on 0.0.0.0, and turn the security plugin on (with Keycloak or a service
+# account) before this runs anywhere other people can reach.
+name: rag
+
+services:
+  opensearch:
+    image: opensearchproject/opensearch:2.17.1
+    environment:
+      discovery.type: single-node
+      DISABLE_SECURITY_PLUGIN: "true"
+      DISABLE_INSTALL_DEMO_CONFIG: "true"
+      OPENSEARCH_JAVA_OPTS: "-Xms1g -Xmx1g"  # heap; the container needs about twice this in total
+    ports:
+      - "127.0.0.1:9200:9200"
+    volumes:
+      - opensearch-data:/usr/share/opensearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs http://localhost:9200/_cluster/health >/dev/null || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+volumes:
+  opensearch-data:

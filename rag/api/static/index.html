@@ -1,0 +1,370 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RAG document chat</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --panel: #ffffff; --text: #1d2330; --muted: #5d6677; --line: #dde1e8;
+    --accent: #2f5fd0; --good: #1c7a46; --bad: #b3261e; --warn: #8a5a00;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #14171d; --panel: #1c212b; --text: #e6e9ef; --muted: #99a2b3; --line: #2c3340;
+            --accent: #7da2ff; --good: #5fcf92; --bad: #ff8a80; --warn: #e8b64a; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 14px/1.5 system-ui, sans-serif; background: var(--bg); color: var(--text); }
+  main { display: grid; grid-template-columns: 280px 1fr 360px; gap: 12px; padding: 12px; height: 100vh; }
+  section { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px;
+            overflow: auto; min-height: 0; }
+  h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin: 0 0 8px; }
+  .doc { padding: 8px; border: 1px solid var(--line); border-radius: 6px; margin-bottom: 6px; cursor: pointer; }
+  .doc.sel { border-color: var(--accent); }
+  .doc small, .meta { color: var(--muted); font-size: 12px; }
+  .state-ready { color: var(--good); } .state-failed { color: var(--bad); }
+  .state-queued, .state-processing { color: var(--warn); }
+  #chat { display: flex; flex-direction: column; }
+  #log { flex: 1; overflow: auto; }
+  .msg { margin: 0 0 10px; padding: 8px 10px; border-radius: 6px; white-space: pre-wrap; }
+  .q { background: var(--bg); } .a { border: 1px solid var(--line); cursor: pointer; }
+  .a.sel { border-color: var(--accent); }
+  .tag { display: inline-block; font-size: 11px; padding: 0 6px; border-radius: 8px; border: 1px solid var(--line); margin-right: 4px; }
+  .tag.bad { color: var(--bad); border-color: var(--bad); } .tag.warn { color: var(--warn); border-color: var(--warn); }
+  form.ask { display: grid; gap: 6px; margin-top: 8px; }
+  form.ask .controls { display: flex; gap: 6px; align-items: center; }
+  form.ask .controls button.primary { margin-left: auto; }
+  textarea { width: 100%; min-height: 64px; max-height: 240px; resize: vertical; padding: 8px; font: inherit; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--text); }
+  .skeleton .bar { height: 12px; border-radius: 4px; margin: 6px 0; background: linear-gradient(90deg, var(--line) 25%, var(--bg) 50%, var(--line) 75%); background-size: 200% 100%; animation: shimmer 1.2s infinite linear; }
+  .skeleton .bar.short { width: 55%; }
+  @keyframes shimmer { from { background-position: 200% 0; } to { background-position: -200% 0; } }
+  .head { display: flex; justify-content: space-between; align-items: center; }
+  #status { display: flex; align-items: center; gap: 6px; cursor: help; }
+  .light { display: inline-block; width: 11px; height: 11px; border-radius: 50%; background: var(--muted); }
+  .light.green { background: var(--good); } .light.amber { background: var(--warn); } .light.red { background: var(--bad); }
+  #starting { color: var(--warn); margin-bottom: 8px; }
+  button.more { padding: 0 8px; font-size: 12px; }
+  button, select { padding: 7px 12px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); color: var(--text); cursor: pointer; }
+  button.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+  button:disabled { opacity: .5; cursor: default; }
+  .passage { border: 1px solid var(--line); border-radius: 6px; padding: 8px; margin-bottom: 8px; }
+  .passage.cited { border-color: var(--good); }
+  .passage pre { margin: 6px 0 0; white-space: pre-wrap; font: 12px/1.45 ui-monospace, monospace; max-height: 180px; overflow: auto; }
+  table { border-collapse: collapse; width: 100%; font-size: 12px; } td, th { text-align: left; padding: 2px 6px; border-bottom: 1px solid var(--line); }
+  #upload { display: grid; gap: 6px; margin-bottom: 12px; }
+  #error { color: var(--bad); margin-top: 6px; }
+  @media (max-width: 900px) { main { grid-template-columns: 1fr; height: auto; } section { max-height: none; } }
+</style>
+</head>
+<body>
+<main>
+  <section>
+    <h2>Documents</h2>
+    <form id="upload">
+      <input type="file" id="file" accept="application/pdf,.pdf" required>
+      <select id="chunker" title="How the document is split into chunks">
+        <option value="recursive">recursive chunks</option>
+        <option value="heading">heading-aware chunks</option>
+        <option value="fixed">fixed-size chunks</option>
+        <option value="semantic">semantic chunks (slower)</option>
+        <option value="parent_child">parent-child chunks</option>
+      </select>
+      <button class="primary" type="submit">Upload and index</button>
+    </form>
+    <div id="starting" class="meta" hidden>Loading the models (once after each restart). You can look at your documents now; questions open up when this goes away.</div>
+    <div id="docs"></div>
+  </section>
+
+  <section id="chat">
+    <div class="head">
+      <h2 id="title">Select or upload a document</h2>
+      <span id="status" tabindex="0" role="status" title="Checking...">
+        <span id="light" class="light"></span><small id="statusText" class="meta">checking</small>
+      </span>
+    </div>
+    <div id="log"></div>
+    <div id="error"></div>
+    <form class="ask" id="ask">
+      <textarea id="question" rows="3" placeholder="Ask a question (Enter sends, Shift+Enter adds a line)" maxlength="2000" disabled></textarea>
+      <div class="controls">
+        <select id="scope" title="Which documents to search">
+          <option value="all">all my documents</option>
+          <option value="checked">checked documents</option>
+          <option value="one">this document</option>
+        </select>
+        <select id="mode" title="What the question is about">
+          <option value="content">about their content</option>
+          <option value="about">about the documents themselves</option>
+        </select>
+        <select id="config" title="Retrieval configuration">
+          <option value="weighted">hybrid (weighted)</option>
+          <option value="rrf">hybrid (rrf)</option>
+          <option value="dense">dense only</option>
+          <option value="bm25">keyword only</option>
+        </select>
+        <button class="primary" type="submit" id="send" disabled>Ask</button>
+      </div>
+    </form>
+  </section>
+
+  <section>
+    <h2>What the pipeline saw</h2>
+    <div id="detail" class="meta">Click an answer to see its passages and stage timings.</div>
+  </section>
+</main>
+
+<script>
+// Everything shown comes from documents or a model, so it is untrusted: only textContent is used, never innerHTML.
+const $ = (id) => document.getElementById(id);
+let docs = [], selected = null, answers = {}, poll = null, ready = false;
+const checked = new Set();
+
+function el(tag, props = {}, ...kids) {
+  const node = document.createElement(tag);
+  for (const [k, v] of Object.entries(props)) { if (k === "class") node.className = v; else node[k] = v; }
+  for (const kid of kids) node.append(kid);
+  return node;
+}
+
+async function api(path, options) {
+  const res = await fetch(path, options);
+  if (!res.ok) {
+    let detail = res.statusText;
+    try { detail = (await res.json()).detail || detail; } catch (_) {}
+    throw new Error(`${res.status}: ${typeof detail === "string" ? detail : JSON.stringify(detail)}`);
+  }
+  return res.status === 204 ? null : res.json();
+}
+
+// A long text is shown short with a "more" button that opens the whole of it (and "less" closes it).
+function longText(text, limit = 240) {
+  const box = el("span");
+  if (text.length <= limit) { box.textContent = text; return box; }
+  const shortText = text.slice(0, limit) + "…";
+  const body = el("span", {}, shortText);
+  const toggle = el("button", { type: "button", class: "more", textContent: "more" });
+  let open = false;
+  toggle.onclick = (e) => { e.stopPropagation(); open = !open; body.textContent = open ? text : shortText; toggle.textContent = open ? "less" : "more"; };
+  box.append(body, " ", toggle);
+  return box;
+}
+
+function showError(message) { $("error").replaceChildren(message ? longText(message) : ""); }
+
+async function refresh() {
+  docs = await api("/v1/documents");
+  const box = $("docs"); box.replaceChildren();
+  for (const d of docs) {
+    const node = el("div", { class: "doc" + (selected === d.id ? " sel" : "") },
+      el("div", {}, d.name),
+      el("small", { class: "state-" + d.state }, d.state === "processing" && d.stage ? "processing: " + d.stage : d.state === "failed" && d.stage ? "failed while " + d.stage : d.state),
+      el("small", {}, d.state === "ready" ? ` · ${d.chunks} chunks · ${d.chunker}` + (d.flagged_chunks ? ` · ${d.flagged_chunks} flagged` : "") : ""),
+      d.error ? el("small", {}, " · ", longText(d.error, 120)) : el("small"));
+    node.onclick = () => select(d.id);
+    if (d.state === "ready") {
+      const pick = el("input", { type: "checkbox", checked: checked.has(d.id), title: "Include in questions over checked documents" });
+      pick.onclick = (e) => { e.stopPropagation(); if (pick.checked) checked.add(d.id); else checked.delete(d.id); updateChat(); };
+      node.prepend(pick);
+    }
+    const del = el("button", { textContent: "Delete", title: "Delete this document" });
+    del.onclick = async (e) => { e.stopPropagation(); await api("/v1/documents/" + d.id, { method: "DELETE" }); if (selected === d.id) selected = null; checked.delete(d.id); refresh().then(updateChat); };
+    node.append(el("div", {}, del));
+    box.append(node);
+  }
+  if (docs.some((d) => d.state === "queued" || d.state === "processing")) schedulePoll();
+}
+
+function schedulePoll() {
+  clearTimeout(poll);
+  // a failed poll must not end polling, or the document looks stuck until the page is reloaded
+  poll = setTimeout(() => refresh().then(updateChat).catch((err) => { showError(err.message); schedulePoll(); }), 2000);
+}
+
+// Choosing another document keeps the conversation: each question says which documents it went to.
+function select(id) { selected = id; refresh().then(updateChat); }
+
+function scopeLabel() {
+  const scope = $("scope").value, d = docs.find((x) => x.id === selected);
+  return scope === "all" ? "all my documents" : scope === "checked" ? `${checked.size} checked document(s)` : d ? d.name : "";
+}
+
+function targets() {
+  // the document ids a question goes to: null means every ready document, [] means nothing to ask
+  const readyIds = docs.filter((x) => x.state === "ready").map((x) => x.id);
+  const scope = $("scope").value;
+  if (scope === "all") return readyIds.length ? null : [];
+  if (scope === "checked") return readyIds.filter((id) => checked.has(id));
+  return readyIds.includes(selected) ? [selected] : [];
+}
+
+function updateChat() {
+  const d = docs.find((x) => x.id === selected);
+  const scope = $("scope").value, ids = targets();
+  const can = ready && (ids === null || ids.length > 0);
+  $("title").textContent = scope === "all" ? "All my documents" : scope === "checked" ? `Checked documents (${checked.size})` : d ? d.name : "Select or upload a document";
+  $("question").disabled = !can; $("send").disabled = !can;
+  $("config").disabled = $("mode").value === "about";  // retrieval settings do not apply to profiles
+  $("question").placeholder = !ready ? "Loading the models..." : can ? "Ask a question (Enter sends, Shift+Enter adds a line)" : scope === "checked" ? "Tick at least one ready document" : d && d.state !== "ready" ? "Document is " + d.state + "..." : "Select a document first";
+}
+$("scope").onchange = updateChat;
+$("mode").onchange = updateChat;
+$("question").onkeydown = (e) => {  // Enter sends, Shift+Enter makes a new line
+  if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); if (!$("send").disabled) $("ask").requestSubmit(); }
+};
+
+$("upload").onsubmit = async (e) => {
+  e.preventDefault(); showError("");
+  const form = new FormData();
+  form.append("file", $("file").files[0]); form.append("chunker", $("chunker").value);
+  try {
+    const d = await api("/v1/documents", { method: "POST", body: form }); selected = d.id; $("file").value = "";
+    if (d.duplicate) showError(`You already uploaded this file as "${d.name}", so it was selected instead of indexed again.`);
+  }
+  catch (err) { showError(err.message); }
+  refresh().then(updateChat);
+};
+
+// Asks a question and reads the answer as server-sent events: "token" events carry text that has passed the
+// server's stream guard, "final" carries the checked answer and everything else, "error" a failure part-way.
+async function streamAsk(path, body, onText) {
+  const res = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  if (!res.ok) {  // a problem found before streaming starts is an ordinary HTTP error
+    let detail = res.statusText;
+    try { detail = (await res.json()).detail || detail; } catch (_) {}
+    throw new Error(`${res.status}: ${typeof detail === "string" ? detail : JSON.stringify(detail)}`);
+  }
+  const reader = res.body.getReader(), decoder = new TextDecoder();
+  let buffer = "", final = null;
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    let cut;
+    while ((cut = buffer.indexOf("\n\n")) >= 0) {  // a frame ends at a blank line
+      const frame = buffer.slice(0, cut); buffer = buffer.slice(cut + 2);
+      const name = (frame.match(/^event: (.*)$/m) || [])[1];
+      const data = JSON.parse((frame.match(/^data: (.*)$/m) || [])[1] || "{}");
+      if (name === "token") onText(data.text);
+      else if (name === "final") final = data;
+      else if (name === "error") throw new Error(data.detail);
+    }
+  }
+  if (!final) throw new Error("the answer stream ended before it was complete");
+  return final;
+}
+
+$("ask").onsubmit = async (e) => {
+  e.preventDefault(); showError("");
+  const question = $("question").value.trim(); const ids = targets(); if (!question || (ids !== null && !ids.length)) return;
+  $("question").value = ""; $("send").disabled = true;
+  const asked = el("div", { class: "msg q" }, question, el("br"), el("small", { class: "meta" }, "asked of: " + scopeLabel()));
+  $("log").append(asked);
+  try {
+    const about = $("mode").value === "about";  // compare or describe the documents, from their profiles
+    const msg = el("div", { class: "msg a" });
+    const shown = document.createTextNode("");  // the answer as it arrives; text only, never markup
+    msg.append(shown);
+    $("log").append(msg);
+    let r;
+    try {
+      if (about) {
+        r = await api("/v1/ask-about", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ question, doc_ids: ids }) });
+      } else {
+        r = await streamAsk("/v1/ask/stream", { question, doc_ids: ids, config: $("config").value }, (text) => { shown.data += text; msg.scrollIntoView({ block: "nearest" }); });
+      }
+    } catch (err) {
+      msg.prepend(el("span", { class: "tag bad" }, shown.data ? "incomplete" : "no answer"), el("br"));
+      throw err;  // reported below, with the partial text left in place
+    }
+    answers[r.query_id] = r;
+    // the checked answer replaces what was streamed (they are the same unless the final check failed)
+    msg.replaceChildren(r.answer || "");
+    if (r.replace) msg.prepend(el("span", { class: "tag bad" }, "replaced after the final check"), el("br"));
+    if (r.blocked.length) msg.prepend(el("span", { class: "tag bad" }, "withheld: " + r.blocked.join(", ")), el("br"));
+    if (r.abstained) msg.prepend(el("span", { class: "tag warn" }, "abstained"), el("br"));
+    msg.onclick = () => { document.querySelectorAll(".a").forEach((n) => n.classList.remove("sel")); msg.classList.add("sel"); r.profiles ? detailAbout(r) : detail(r); };
+    msg.click(); msg.scrollIntoView();
+  } catch (err) {
+    showError(err.message);
+    const failed = el("div", { class: "msg a" }, el("span", { class: "tag bad" }, "no answer"), el("br"), longText(err.message));
+    $("log").append(failed); failed.scrollIntoView(); checkStatus();  // the question stays in the log with its failure beside it
+  }
+  $("send").disabled = false; $("question").focus();
+};
+
+// What an "about the documents" answer was based on: each document's profile as the model saw it.
+function detailAbout(r) {
+  const box = $("detail"); box.replaceChildren();
+  box.append(el("div", { class: "meta" }, `${r.llm} · ${r.seconds}s · cited: ${r.citations.join(", ") || "none"}`));
+  box.append(el("h2", {}, "Profiles sent to the model"));
+  for (const p of r.profiles) {
+    const part = el("div", { class: "passage" + (r.citations.includes(p.label) ? " cited" : "") },
+      el("div", { class: "meta" }, `[${p.label}] ${p.name} · ${p.pages} pages · ${p.toc.length} of ${p.toc_total} contents entries`));
+    if (p.withheld.length) part.append(el("div", { class: "meta" }, "left out as instruction-like: " + p.withheld.join("; ")));
+    part.append(el("div", { class: "meta" }, "Contents"), el("pre", {}, p.toc.map((e) => "  ".repeat(e.level - 1) + e.title + " (p. " + e.page + ")").join("\n") || "(none)"));
+    part.append(el("div", { class: "meta" }, `Opening excerpt (page ${p.opening_page})`), el("pre", {}, p.opening || "(none)"));
+    box.append(part);
+  }
+}
+
+function detail(r) {
+  const box = $("detail"); box.replaceChildren();
+  box.append(el("div", { class: "meta" }, `${r.llm} · ${r.seconds}s · cited: ${r.citations.join(", ") || "none"}`));
+  const table = el("table", {}, el("tr", {}, el("th", {}, "stage"), el("th", {}, "hits"), el("th", {}, "ms")));
+  for (const s of r.stages) table.append(el("tr", {}, el("td", {}, s.name), el("td", {}, String(s.hits)), el("td", {}, String(s.ms))));
+  box.append(el("h2", {}, "Stages"), table);
+  if (r.skipped_by_scanner.length) {
+    box.append(el("h2", {}, "Skipped by the scanner"));
+    for (const s of r.skipped_by_scanner) box.append(el("div", { class: "meta" }, `${s.chunk_id}: ${s.rules.join(", ")}`));
+  }
+  box.append(el("h2", {}, "Passages sent to the model"));
+  for (const p of r.passages) {
+    const pages = p.page_start === p.page_end ? "p. " + p.page_start : `pp. ${p.page_start}-${p.page_end}`;
+    box.append(el("div", { class: "passage" + (r.citations.includes(p.label) ? " cited" : "") },
+      el("div", { class: "meta" }, `[${p.label}] ${r.documents.length > 1 ? p.doc_name + " · " : ""}${pages} · score ${p.score} · ${p.chunk_id}`), el("pre", {}, p.text)));
+  }
+}
+
+// Placeholder rows while the list loads, so the page shows at once that documents are coming.
+function skeletonRows(count = 3) {
+  const box = $("docs"); box.replaceChildren();
+  for (let i = 0; i < count; i++) box.append(el("div", { class: "doc skeleton" }, el("div", { class: "bar" }), el("div", { class: "bar short" })));
+}
+
+// The server loads its models in the background after a start; questions wait until it says it is ready.
+async function checkReady() {
+  try { ready = (await api("/v1/health")).ready; } catch (_) { ready = false; }
+  $("starting").hidden = ready;
+  updateChat();
+  if (!ready) setTimeout(checkReady, 1500);
+}
+
+// The light: green = model server and database answer, amber = models still loading, red = something does not answer.
+// Hover (or focus) shows the details; clicking checks again.
+let statusTimer = null;
+async function checkStatus() {
+  clearTimeout(statusTimer);
+  let s = null, color = "amber", label = "checking", lines = [];
+  try { s = await api("/v1/status"); } catch (err) { color = "red"; label = "server not answering"; lines = [err.message]; }
+  if (s && !s.models_loaded) { label = "loading models"; lines = ["The server is loading its models; this happens once after each restart."]; }
+  else if (s) {
+    const bad = !s.llm.ok || !s.search.ok;
+    color = bad ? "red" : "green";
+    label = !s.llm.ok ? "model server not reachable" : !s.search.ok ? "database not reachable" : "model connected";
+    lines = [`Model server: ${s.llm.ok ? "working" : "NOT working"} (${s.llm.name})`, `  ${s.llm.detail}`,
+             `Search database: ${s.search.ok ? "working" : "NOT working"}`, `  ${s.search.detail}`];
+  }
+  $("light").className = "light " + color;
+  $("statusText").textContent = label;
+  $("status").title = lines.join("\n") + "\n(click to check again)";
+  statusTimer = setTimeout(checkStatus, color === "green" ? 15000 : 3000);
+}
+$("status").onclick = checkStatus;
+
+skeletonRows();
+checkReady();
+checkStatus();
+refresh().then(updateChat).catch((err) => { $("docs").replaceChildren(); showError(err.message); });
+</script>
+</body>
+</html>
