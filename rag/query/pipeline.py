@@ -219,4 +219,8 @@ class RagPipeline:
             trace.answer, blocked = verdict.answer, verdict.reasons
             replace = verdict.blocked and bool(guard.released)
         self._record(trace, prompt, answer, blocked)
+        if result is None:
+            # We stopped early (the guard blocked), so the server's token counts never arrived. They are
+            # unknown, not zero: the model was still billed for the prompt and what it had written.
+            trace.config["usage"].update(prompt_tokens=None, output_tokens=None, usage_known=False)
         yield ("final", "1" if replace else "")

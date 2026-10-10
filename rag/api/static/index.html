@@ -273,21 +273,26 @@ $("ask").onsubmit = async (e) => {
         r = await streamAsk("/v1/ask/stream", { question, doc_ids: ids, config: $("config").value }, (text) => { shown.data += text; msg.scrollIntoView({ block: "nearest" }); });
       }
     } catch (err) {
+      // One bubble for the question's failure: the partial text (if any), a tag, and the reason, with the
+      // reason folded behind "more" when it is long.
+      showError(err.message);
       msg.prepend(el("span", { class: "tag bad" }, shown.data ? "incomplete" : "no answer"), el("br"));
-      throw err;  // reported below, with the partial text left in place
+      msg.append(el("br"), longText(err.message));
+      msg.scrollIntoView(); checkStatus();
+      r = null;
     }
-    answers[r.query_id] = r;
-    // the checked answer replaces what was streamed (they are the same unless the final check failed)
-    msg.replaceChildren(r.answer || "");
-    if (r.replace) msg.prepend(el("span", { class: "tag bad" }, "replaced after the final check"), el("br"));
-    if (r.blocked.length) msg.prepend(el("span", { class: "tag bad" }, "withheld: " + r.blocked.join(", ")), el("br"));
-    if (r.abstained) msg.prepend(el("span", { class: "tag warn" }, "abstained"), el("br"));
-    msg.onclick = () => { document.querySelectorAll(".a").forEach((n) => n.classList.remove("sel")); msg.classList.add("sel"); r.profiles ? detailAbout(r) : detail(r); };
-    msg.click(); msg.scrollIntoView();
+    if (r) {
+      answers[r.query_id] = r;
+      // the checked answer replaces what was streamed (they are the same unless the final check failed)
+      msg.replaceChildren(r.answer || "");
+      if (r.replace) msg.prepend(el("span", { class: "tag bad" }, "replaced after the final check"), el("br"));
+      if (r.blocked.length) msg.prepend(el("span", { class: "tag bad" }, "withheld: " + r.blocked.join(", ")), el("br"));
+      if (r.abstained) msg.prepend(el("span", { class: "tag warn" }, "abstained"), el("br"));
+      msg.onclick = () => { document.querySelectorAll(".a").forEach((n) => n.classList.remove("sel")); msg.classList.add("sel"); r.profiles ? detailAbout(r) : detail(r); };
+      msg.click(); msg.scrollIntoView();
+    }
   } catch (err) {
-    showError(err.message);
-    const failed = el("div", { class: "msg a" }, el("span", { class: "tag bad" }, "no answer"), el("br"), longText(err.message));
-    $("log").append(failed); failed.scrollIntoView(); checkStatus();  // the question stays in the log with its failure beside it
+    showError(err.message);  // a problem while drawing the answer; the question stays in the log
   }
   $("send").disabled = false; $("question").focus();
 };

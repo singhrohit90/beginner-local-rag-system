@@ -26,9 +26,11 @@ import json
 import logging
 import re
 import threading
+import time
 from contextlib import asynccontextmanager
 from urllib.parse import urlparse
 
+import anyio
 from fastapi import APIRouter, BackgroundTasks, Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.concurrency import iterate_in_threadpool, run_in_threadpool
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
@@ -52,6 +54,20 @@ def current_owner() -> str:
     replace this function and nothing else (docs/auth_plan.md); tests override it to act as two
     users. It must never read the owner from a header or a field the caller controls."""
     return LOCAL_OWNER
+
+
+def _close_when_idle(generator: Iterator, seconds: float = 5.0) -> None:
+    """Close a generator that a worker thread may still be running. Python refuses to close a running
+    generator (ValueError), so wait until it pauses, which for a stream is at its next piece."""
+    deadline = time.monotonic() + seconds
+    while True:
+        try:
+            generator.close()
+            return
+        except ValueError:
+            if time.monotonic() >= deadline:
+                return
+            time.sleep(0.02)
 
 
 def _sse(event: str, data: Dict[str, Any]) -> bytes:
@@ -214,11 +230,15 @@ def create_app(
 
     def answer_request(request: AskRequest, call: Callable[[], Dict[str, Any]], what: str) -> Dict[str, Any]:
         """Validate the options, run the question, and map failures to HTTP errors. Shared by the ask routes."""
+        check_options(request)
+        return guarded(call, what)
+
+    def check_options(request: AskRequest) -> None:
+        """The one place that decides which configs and styles a caller may ask for (ask and ask/stream)."""
         if request.config not in USABLE_CONFIGS:
             raise HTTPException(422, f"config must be one of {USABLE_CONFIGS}")
         if request.style not in ("standard", "spotlight"):
             raise HTTPException(422, "style must be standard or spotlight")
-        return guarded(call, what)
 
     def guarded(call: Callable[[], Dict[str, Any]], what: str) -> Dict[str, Any]:
         """Run a question and map its failures to HTTP errors."""
@@ -244,31 +264,31 @@ def create_app(
         """Validate, run retrieval (errors become proper HTTP statuses here), then stream the answer as
         server-sent events: "token" events with text that passed the stream guard, then one "final"
         event with the whole response, or one "error" event if the model fails part-way."""
-        if request.config not in USABLE_CONFIGS:
-            raise HTTPException(422, f"config must be one of {USABLE_CONFIGS}")
-        if request.style not in ("standard", "spotlight"):
-            raise HTTPException(422, "style must be standard or spotlight")
+        check_options(request)
         events = guarded(start, what)  # NotFound, BadUpload and retrieval failures end here, before any byte is sent
-        cancel = threading.Event()
 
         def frames() -> Iterator[bytes]:
             try:
                 for event in events:
-                    if cancel.is_set():  # the browser went away: stop, which closes the model connection
-                        break
                     yield _sse(event["event"], event["data"])
             except Exception as err:  # the model server failed part-way
                 logger.exception("stream failed for %s", what)
                 yield _sse("error", {"detail": public_reason(err)})
             finally:
-                events.close()
+                events.close()  # closing the events closes the model connection, so the server stops generating
+
+        frame_iter = frames()
 
         async def body():
             try:
-                async for frame in iterate_in_threadpool(frames()):
+                async for frame in iterate_in_threadpool(frame_iter):
                     yield frame
             finally:
-                cancel.set()
+                # The browser went away, or the stream ended. Close the generator explicitly so the model
+                # stops now and not whenever Python collects it; shielded, because a disconnect cancels
+                # this task and an unshielded await here would be cancelled at once.
+                with anyio.CancelScope(shield=True):
+                    await run_in_threadpool(_close_when_idle, frame_iter)
 
         return StreamingResponse(body(), media_type="text/event-stream",
                                  headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
