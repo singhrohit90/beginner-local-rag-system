@@ -241,6 +241,8 @@ Every document belongs to an owner and another owner's document is always a 404.
 file again returns the existing document (`duplicate: true`), and a processing document shows its stage
 (extracting, chunking, embedding). See `docs/auth_plan.md` and `docs/mcp_risks.md` before exposing it.
 
+Answers stream: `POST /v1/ask/stream` and `POST /v1/documents/{id}/ask/stream` return server-sent events (`token` events with text that passed the stream guard, then one `final` event with the whole response, or an `error` event if the model fails part-way). `StreamGuard` (`query/guard.py`) holds back anything that could be the start of a risky piece until it is judged, because text already sent cannot be taken back; if the whole-answer check still fails, the page replaces what it showed. Closing the connection stops the model. Design and reasons: `interview/04_system_design_and_streaming.md`, section 8.
+
 ## Step 9: vector database (OpenSearch)
 
     docker compose up -d opensearch          # run in WSL; listens on 127.0.0.1:9200 only

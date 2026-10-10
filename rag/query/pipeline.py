@@ -11,19 +11,19 @@ switch a stage off, and a stage that is off leaves no trace entry, so the eval s
 """
 
 from dataclasses import asdict
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, Iterator, List, Optional, Sequence, Tuple
 
 from rag.common.chunk_store import ChunkStore, MemoryChunkStore, Scope
 from rag.common.embed import Embedder
-from rag.common.llm import LLM
+from rag.common.llm import LLM, LLMResult, stream_answer
 from rag.common.store import VectorIndex
 from rag.common.trace import Trace
 from rag.common.types import Chunk, Hit
 from rag.ingestion.chunking.base import ChunkSet
 from rag.query import fusion
 from rag.query.configs import RetrievalConfig
-from rag.query.generate import answer_from_context
-from rag.query.guard import filter_output
+from rag.query.generate import Answer, answer_from_context, answer_from_result, build_prompts
+from rag.query.guard import StreamGuard, filter_output
 from rag.query.rerank import Reranker
 from rag.query.retrieve import dense_search, keyword_search
 from rag.query.select_context import ContextConfig, hit_from_chunk, select_context
@@ -157,13 +157,16 @@ class RagPipeline:
         context = trace.stage("context").hits
         answer, prompt = answer_from_context(self.llm, question, context, style=self.style,
                                            subject=self.subject)
-        trace.config["prompt_style"] = self.style
-        trace.prompt = prompt
         trace.answer = answer.text
         blocked: List[str] = []
         if self.output_filter:
             result = filter_output(answer.text, " ".join(h.text for h in context))
             trace.answer, blocked = result.answer, result.reasons
+        return self._record(trace, prompt, answer, blocked)
+
+    def _record(self, trace: Trace, prompt: str, answer: Answer, blocked: List[str]) -> Trace:
+        trace.config["prompt_style"] = self.style
+        trace.prompt = prompt
         trace.citations = [f"S{n}" for n in answer.cited]
         trace.config["llm"] = self.llm.name
         trace.config["usage"] = {
@@ -173,3 +176,47 @@ class RagPipeline:
             "blocked": blocked,
         }
         return trace
+
+    def stream(self, trace: Trace) -> Iterator[Tuple[str, str]]:
+        """Generate from the context in a retrieval trace, as a stream of events:
+
+            ("token", text)     text that is safe to show now (it has passed the stream guard)
+            ("final", replace)  the answer is finished and recorded in the trace; trace.answer is the
+                                checked answer. replace is "1" when text already shown must be replaced
+                                by trace.answer (the whole-answer check failed after some text went out).
+
+        The guard (rag.query.guard.StreamGuard) holds back anything that could be the start of a
+        risky piece until it is judged, so a blocked answer has not already leaked a link. If the
+        guard blocks, generation is stopped (the model connection is closed)."""
+        context = trace.stage("context").hits
+        system, prompt = build_prompts(trace.question, context, self.style, self.subject)
+        guard = StreamGuard(" ".join(h.text for h in context)) if self.output_filter else None
+        pieces = stream_answer(self.llm, system, prompt, max_output_tokens=600)
+        result: Optional[LLMResult] = None
+        raw: List[str] = []
+        try:
+            for piece in pieces:
+                if piece.result is not None:
+                    result = piece.result
+                    break
+                raw.append(piece.text)
+                safe = guard.feed(piece.text) if guard else piece.text
+                if safe:
+                    yield ("token", safe)
+                if guard and guard.blocked:
+                    break  # stop paying for text that will be withheld
+        finally:
+            pieces.close()  # closes the model connection when we stopped early or the reader went away
+        text = result.text if result else ("".join(raw)).strip()
+        answer = answer_from_result(result or LLMResult(text=text), context)
+        blocked: List[str] = []
+        replace = False
+        trace.answer = text
+        if guard:
+            tail, verdict = guard.finish()
+            if tail:
+                yield ("token", tail)
+            trace.answer, blocked = verdict.answer, verdict.reasons
+            replace = verdict.blocked and bool(guard.released)
+        self._record(trace, prompt, answer, blocked)
+        yield ("final", "1" if replace else "")

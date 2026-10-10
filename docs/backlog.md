@@ -4,12 +4,7 @@ Open items that are not built yet, with the reason each matters. Newest first in
 
 ## UI and API
 
-- **The UI does not stream.** An answer, and the progress of an upload, appear all at once. Streaming needs:
-  - an endpoint such as `POST /v1/documents/{id}/ask/stream` returning server-sent events (`StreamingResponse`);
-  - a streaming call in `rag/common/llm.py` (`OpenAICompatLLM` waits for the whole reply today); the reasoning model sends its thinking separately, which must not be shown;
-  - a decision about the output guard: `filter_output` judges the whole answer and can withhold it, which conflicts with showing words as they arrive (options: buffer until the check passes, or stream and retract);
-  - citations are parsed at the end, so the page would link them when the stream finishes;
-  - upload progress, the cheaper half, is already done (see below).
+- **Streaming answers: done** (2026-10-10). `POST /v1/ask/stream` and `POST /v1/documents/{id}/ask/stream` return server-sent events. The model client's `generate_stream` (`rag/common/llm.py`) yields answer text only, keeps the thinking for debugging and never sends it, and closes the connection when the reader goes away so the model stops. `StreamGuard` (`rag/query/guard.py`) holds back anything that could be the start of a risky piece (an image or link, a tag, an entity, the canary, system-prompt text) until it is judged, so a blocked answer has not already leaked it; the whole-answer check still runs at the end and the page replaces the text if it fails. Design and reasons: `interview/04_system_design_and_streaming.md`, section 8. Still open: a Stop button, streaming for the "about the documents" path (it answers in one piece), and a percentage inside the embedding stage of an upload.
 - **Duplicate uploads: done** for new uploads (same owner, same sha256 returns the existing document). Still open: uploads made before the hash existed are not recognised, and a caller-supplied `external_id` for a scraper (see `docs/auth_plan.md`).
 - **Readable folder names.** Folders are a random id (`data/uploads/<id>/`); only the UI shows the real name.
 - **Chat across several documents: done** (`POST /v1/ask`, one, several or all of the caller's documents). Cross-document questions are not saved as traces; decide how to keep them with a retention rule (see Security).

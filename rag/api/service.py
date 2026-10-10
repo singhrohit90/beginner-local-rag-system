@@ -18,7 +18,7 @@ import threading
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Set
+from typing import Any, Dict, Iterator, List, Optional, Sequence, Set
 
 from rag.common.embed import Embedder
 from rag.common.llm import LLM
@@ -420,9 +420,10 @@ class DocumentService:
             style: str = "standard") -> Dict[str, Any]:
         return self.ask_documents(owner, [doc_id], question, config, style)
 
-    def ask_documents(self, owner: str, doc_ids: Optional[Sequence[str]], question: str,
-                      config: str = "weighted", style: str = "standard") -> Dict[str, Any]:
-        """Answer from one, several or (doc_ids None) all of the owner's documents."""
+    def _retrieve(self, owner: str, doc_ids: Optional[Sequence[str]], question: str, config: str, style: str):
+        """Everything before the model is called: which documents, loading them, and the retrieval
+        trace. Raises NotFound or BadUpload here, so a streaming request can still answer with a
+        proper HTTP status before any streaming starts."""
         statuses = self._ready_documents(owner, doc_ids)
         for status in statuses:
             self._ensure_loaded(status)
@@ -431,13 +432,20 @@ class DocumentService:
         single = len(statuses) == 1
         started = time.perf_counter()
         query_id = f"{statuses[0]['id'] if single else 'multi'}-{int(time.time() * 1000)}"
-        trace = RagPipeline(retrieval, self.llm, style=style, subject="document").run(query_id, question, CONFIGS[config])
-        if self.keep_traces and single:
+        rag = RagPipeline(retrieval, self.llm, style=style, subject="document")
+        trace = retrieval.run(query_id, question, CONFIGS[config])
+        return rag, trace, {"names": names, "single": single, "started": started, "query_id": query_id,
+                            "first": statuses[0]["id"]}
+
+    def _describe(self, trace, info: Dict[str, Any]) -> Dict[str, Any]:
+        """Save the trace (single-document questions only) and build the response."""
+        names, started, query_id = info["names"], info["started"], info["query_id"]
+        if self.keep_traces and info["single"]:
             # Inside the document's folder, so deleting the document deletes its traces. A question over
             # several documents is not saved: its trace holds passages from all of them, and deleting
             # one document could not remove them.
             try:
-                trace.save(self._dir(statuses[0]["id"]) / "chat")
+                trace.save(self._dir(info["first"]) / "chat")
             except NotFound:
                 pass  # deleted while the model was answering
         usage = trace.config.get("usage", {})
@@ -460,3 +468,38 @@ class DocumentService:
             "llm": self.llm.name,
             "seconds": round(time.perf_counter() - started, 2),
         }
+
+    def ask_documents(self, owner: str, doc_ids: Optional[Sequence[str]], question: str,
+                      config: str = "weighted", style: str = "standard") -> Dict[str, Any]:
+        """Answer from one, several or (doc_ids None) all of the owner's documents."""
+        rag, trace, info = self._retrieve(owner, doc_ids, question, config, style)
+        rag.answer(trace)
+        return self._describe(trace, info)
+
+    def ask_documents_stream(self, owner: str, doc_ids: Optional[Sequence[str]], question: str,
+                             config: str = "weighted", style: str = "standard") -> Iterator[Dict[str, Any]]:
+        """Like ask_documents, but returns the answer as a stream of events:
+
+            {"event": "token", "data": {"text": ...}}   text that has passed the stream guard
+            {"event": "final", "data": {...}}           the same response as ask_documents, plus
+                                                        "replace": true when the text already sent must be
+                                                        replaced by data["answer"] (the final check failed)
+
+        Retrieval happens before this returns, so a missing document or a not-ready one raises here,
+        not part-way through a stream. Closing the returned iterator stops the model."""
+        rag, trace, info = self._retrieve(owner, doc_ids, question, config, style)
+        stream = rag.stream(trace)
+
+        def events() -> Iterator[Dict[str, Any]]:
+            try:
+                for kind, value in stream:
+                    if kind == "token":
+                        yield {"event": "token", "data": {"text": value}}
+                    else:
+                        result = self._describe(trace, info)
+                        result["replace"] = bool(value)
+                        yield {"event": "final", "data": result}
+            finally:
+                stream.close()  # a reader that went away must stop the model, not leave it running
+
+        return events()

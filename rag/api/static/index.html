@@ -224,6 +224,35 @@ $("upload").onsubmit = async (e) => {
   refresh().then(updateChat);
 };
 
+// Asks a question and reads the answer as server-sent events: "token" events carry text that has passed the
+// server's stream guard, "final" carries the checked answer and everything else, "error" a failure part-way.
+async function streamAsk(path, body, onText) {
+  const res = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  if (!res.ok) {  // a problem found before streaming starts is an ordinary HTTP error
+    let detail = res.statusText;
+    try { detail = (await res.json()).detail || detail; } catch (_) {}
+    throw new Error(`${res.status}: ${typeof detail === "string" ? detail : JSON.stringify(detail)}`);
+  }
+  const reader = res.body.getReader(), decoder = new TextDecoder();
+  let buffer = "", final = null;
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    let cut;
+    while ((cut = buffer.indexOf("\n\n")) >= 0) {  // a frame ends at a blank line
+      const frame = buffer.slice(0, cut); buffer = buffer.slice(cut + 2);
+      const name = (frame.match(/^event: (.*)$/m) || [])[1];
+      const data = JSON.parse((frame.match(/^data: (.*)$/m) || [])[1] || "{}");
+      if (name === "token") onText(data.text);
+      else if (name === "final") final = data;
+      else if (name === "error") throw new Error(data.detail);
+    }
+  }
+  if (!final) throw new Error("the answer stream ended before it was complete");
+  return final;
+}
+
 $("ask").onsubmit = async (e) => {
   e.preventDefault(); showError("");
   const question = $("question").value.trim(); const ids = targets(); if (!question || (ids !== null && !ids.length)) return;
@@ -232,14 +261,29 @@ $("ask").onsubmit = async (e) => {
   $("log").append(asked);
   try {
     const about = $("mode").value === "about";  // compare or describe the documents, from their profiles
-    const r = await api(about ? "/v1/ask-about" : "/v1/ask", { method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(about ? { question, doc_ids: ids } : { question, doc_ids: ids, config: $("config").value }) });
+    const msg = el("div", { class: "msg a" });
+    const shown = document.createTextNode("");  // the answer as it arrives; text only, never markup
+    msg.append(shown);
+    $("log").append(msg);
+    let r;
+    try {
+      if (about) {
+        r = await api("/v1/ask-about", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ question, doc_ids: ids }) });
+      } else {
+        r = await streamAsk("/v1/ask/stream", { question, doc_ids: ids, config: $("config").value }, (text) => { shown.data += text; msg.scrollIntoView({ block: "nearest" }); });
+      }
+    } catch (err) {
+      msg.prepend(el("span", { class: "tag bad" }, shown.data ? "incomplete" : "no answer"), el("br"));
+      throw err;  // reported below, with the partial text left in place
+    }
     answers[r.query_id] = r;
-    const msg = el("div", { class: "msg a" }, r.answer || "");
+    // the checked answer replaces what was streamed (they are the same unless the final check failed)
+    msg.replaceChildren(r.answer || "");
+    if (r.replace) msg.prepend(el("span", { class: "tag bad" }, "replaced after the final check"), el("br"));
     if (r.blocked.length) msg.prepend(el("span", { class: "tag bad" }, "withheld: " + r.blocked.join(", ")), el("br"));
     if (r.abstained) msg.prepend(el("span", { class: "tag warn" }, "abstained"), el("br"));
     msg.onclick = () => { document.querySelectorAll(".a").forEach((n) => n.classList.remove("sel")); msg.classList.add("sel"); r.profiles ? detailAbout(r) : detail(r); };
-    $("log").append(msg); msg.click(); msg.scrollIntoView();
+    msg.click(); msg.scrollIntoView();
   } catch (err) {
     showError(err.message);
     const failed = el("div", { class: "msg a" }, el("span", { class: "tag bad" }, "no answer"), el("br"), longText(err.message));

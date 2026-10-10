@@ -543,7 +543,7 @@ First, real authentication: Keycloak token validation behind `current_owner`, be
 4. Red-teaming (Not built). An adaptive attacker (human or a model) against the full pipeline, more fixtures, several runs per cell, held-out attacks; the current results come from ten defender-written attacks.
 5. Image proxy and CSP (Not built). Only needed if a client renders model output; the current page does not.
 6. Smaller items: a better scanner (ML classifier), trace retention and redaction (`docs/backlog.md`), automatic filter fuzzing against a real markdown renderer, Linux testing of the sandbox, a container worker with no network for extraction, audit logging.
-7. Streaming caveat (`docs/backlog.md`): `filter_output` judges the whole answer, so streaming conflicts with withholding; any streaming design must decide between buffering and retraction. Good example of a security/UX trade-off.
+7. Streaming (built 2026-10-10; see `04_system_design_and_streaming.md`, section 8): `filter_output` judges the whole answer, so streaming conflicts with withholding. The answer here is `StreamGuard` in `rag/query/guard.py`, which holds back any piece that could be the start of a risky one until it is judged, with the whole-answer check and a replace at the end. Text already sent cannot be recalled, which is why the hold-back matters. Good example of a security/UX trade-off.
 
 **In this repo**
 - Open items recorded in: `docs/backlog.md` ("Security", "Running it", "From the code review of the extraction limits"), `docs/auth_plan.md` ("Order": steps 3 and 4 remain), `docs/mcp_risks.md`.

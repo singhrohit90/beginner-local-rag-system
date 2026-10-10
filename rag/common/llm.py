@@ -12,6 +12,7 @@ this file is the only place that knows how a provider's request and response loo
 """
 
 import hashlib
+import http.client
 import json
 import logging
 import os
@@ -21,7 +22,7 @@ import urllib.error
 import urllib.request
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Callable, List, Optional, Protocol
+from typing import Callable, Iterator, List, Optional, Protocol
 
 from rag.common.config import PROCESSED_DIR
 from rag.common.secrets import load_env, require
@@ -38,6 +39,15 @@ class LLMResult:
     # A reasoning model's thinking, kept for debugging only. It can quote the system prompt, so it
     # must never be shown to a user or counted as part of the answer.
     reasoning: str = ""
+
+
+@dataclass
+class StreamPiece:
+    """One step of a streamed answer: a piece of the answer text, or, as the last piece, the result.
+    The model's thinking is never a piece; it only appears in result.reasoning."""
+
+    text: str = ""
+    result: Optional[LLMResult] = None
 
 
 class LLM(Protocol):
@@ -247,6 +257,104 @@ class OpenAICompatLLM:
             delay = min(delay * 2, 30)
         raise RuntimeError("unreachable")
 
+    def _open_stream(self, payload: dict):
+        """Open the streaming request, with the same retries and messages as _post. Only the opening
+        is retried: once text has been sent on, a failure is reported, not repeated."""
+        url = f"{self._base}/chat/completions"
+        request = urllib.request.Request(url, json.dumps(payload).encode(), self._headers())
+        delay = 2.0
+        for attempt in range(self._retries + 1):
+            try:
+                return urllib.request.urlopen(request, timeout=self._timeout)
+            except urllib.error.HTTPError as err:
+                retryable = err.code in (429, 500, 502, 503, 504)
+                if not retryable or attempt == self._retries:
+                    body = err.read().decode("utf-8", "replace")[:300]
+                    raise RuntimeError(f"model server returned HTTP {err.code}: {body}") from err
+            except urllib.error.URLError as err:
+                reason = getattr(err, "reason", err)
+                if isinstance(reason, ConnectionRefusedError) or "refused" in str(reason).lower():
+                    raise self._unreachable(url, reason) from err  # a dead tunnel will not recover
+                if attempt == self._retries:
+                    raise self._unreachable(url, reason) from err
+            except TimeoutError:
+                if attempt == self._retries:
+                    raise RuntimeError(f"model server did not answer within {self._timeout:.0f}s")
+            logger.warning("model server error, retrying in %.0fs", delay)
+            time.sleep(delay)
+            delay = min(delay * 2, 30)
+        raise RuntimeError("unreachable")
+
+    def generate_stream(self, system: str, user: str, max_output_tokens: int = 1024) -> Iterator[StreamPiece]:
+        """Like generate, but yields the answer as it is written: StreamPiece(text=...) for each piece,
+        then a last StreamPiece(result=...). The model's thinking is read and kept in result.reasoning
+        but never yielded. If the caller stops iterating (the browser went away), the connection is
+        closed, which makes the server stop generating."""
+        for budget in (self._budget, self._budget * 2):
+            payload = {
+                "model": self._model,
+                "messages": [
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                ],
+                "temperature": 0.0,
+                "max_tokens": max_output_tokens + budget,
+                "stream": True,
+                "stream_options": {"include_usage": True},
+            }
+            if self._effort:
+                payload["reasoning_effort"] = self._effort
+            response = self._open_stream(payload)
+            parts: List[str] = []
+            thinking: List[str] = []
+            finish, usage, ended = "", {}, False
+            try:
+                for raw in response:
+                    line = raw.decode("utf-8", "replace").strip()
+                    if not line.startswith("data:"):
+                        continue  # blank separators and comments
+                    data = line[5:].strip()
+                    if data == "[DONE]":
+                        ended = True
+                        break
+                    try:
+                        chunk = json.loads(data)
+                    except ValueError:
+                        continue
+                    usage = chunk.get("usage") or usage
+                    for choice in chunk.get("choices") or []:
+                        delta = choice.get("delta") or {}
+                        piece = delta.get("content") or ""
+                        if piece:
+                            parts.append(piece)
+                            yield StreamPiece(text=piece)
+                        think = delta.get("reasoning") or delta.get("reasoning_content") or ""
+                        if think:
+                            thinking.append(think)
+                        if choice.get("finish_reason"):
+                            finish = str(choice["finish_reason"])
+                            ended = True
+                if not ended:  # the connection closed with no finish reason: a cut-off answer, not a complete one
+                    raise RuntimeError("the model server stopped answering part-way (the stream ended early)")
+            except (OSError, http.client.HTTPException) as err:  # the connection dropped part-way
+                raise RuntimeError(f"the model server stopped answering part-way ({err})") from err
+            finally:
+                response.close()  # also runs when the caller closes this generator early
+            if finish == "length" and not parts:
+                continue  # the thinking used up the whole budget, so retry with more room
+            yield StreamPiece(result=LLMResult(
+                text="".join(parts).strip(),
+                prompt_tokens=int(usage.get("prompt_tokens", 0) or 0),
+                output_tokens=int(usage.get("completion_tokens", 0) or 0),  # includes reasoning
+                finish_reason=finish,
+                reasoning="".join(thinking).strip(),
+            ))
+            return
+        raise RuntimeError(
+            "the answer was cut off by max_tokens, even after doubling the reasoning budget. "
+            "Raise REMOTE_REASONING_BUDGET or lower REMOTE_REASONING_EFFORT."
+        )
+
     def generate(
         self, system: str, user: str, max_output_tokens: int = 1024, json_mode: bool = False
     ) -> LLMResult:
@@ -301,6 +409,14 @@ class FakeLLM:
         self.calls.append((system, user))
         return LLMResult(text=self._reply(system, user))
 
+    def generate_stream(self, system: str, user: str, max_output_tokens: int = 1024) -> Iterator[StreamPiece]:
+        """The scripted reply in small pieces (4 characters), so tests cut words and links in the middle."""
+        self.calls.append((system, user))
+        text = self._reply(system, user)
+        for start in range(0, len(text), 4):
+            yield StreamPiece(text=text[start:start + 4])
+        yield StreamPiece(result=LLMResult(text=text.strip()))
+
 
 class CachedLLM:
     """Wraps any LLM with an on-disk cache keyed by model, prompts and token limit.
@@ -346,6 +462,19 @@ class CachedLLM:
             logger.warning("could not write the LLM cache entry: %s", err)
             temporary.unlink(missing_ok=True)
         return result
+
+
+def stream_answer(llm: LLM, system: str, user: str, max_output_tokens: int = 1024) -> Iterator[StreamPiece]:
+    """Stream the answer if the model client can, otherwise give the whole answer as one piece, so
+    callers work with every provider."""
+    method = getattr(llm, "generate_stream", None)
+    if method is not None:
+        yield from method(system, user, max_output_tokens)
+        return
+    result = llm.generate(system, user, max_output_tokens)
+    if result.text:
+        yield StreamPiece(text=result.text)
+    yield StreamPiece(result=result)
 
 
 def get_llm(spec: str, cache_dir: Optional[Path] = PROCESSED_DIR / "llm_cache") -> LLM:

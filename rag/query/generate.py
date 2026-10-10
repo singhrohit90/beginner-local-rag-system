@@ -48,10 +48,8 @@ class Answer:
     output_tokens: int
 
 
-def answer_from_context(
-    llm: LLM, question: str, context: List[Hit], style: str = "standard", subject: str = "book"
-) -> tuple:
-    """Returns (Answer, user_prompt). style picks the prompts:
+def build_prompts(question: str, context: List[Hit], style: str = "standard", subject: str = "book") -> tuple:
+    """Returns (system_prompt, user_prompt). style picks the prompts:
     standard   the production prompt, which tells the model to ignore instructions in passages
     spotlight  also wraps passages in nonce tags and repeats the warning (rag.security.defenses)
     naive      a first-draft prompt with no injection rules, used only as a baseline in tests
@@ -60,23 +58,32 @@ def answer_from_context(
     if style == "spotlight":
         from rag.security.defenses import SPOTLIGHT_ADDENDUM, spotlight_user_prompt
 
-        system, user_prompt = base + SPOTLIGHT_ADDENDUM, spotlight_user_prompt(question, context)
-    elif style == "naive":
+        return base + SPOTLIGHT_ADDENDUM, spotlight_user_prompt(question, context)
+    if style == "naive":
         from rag.security.defenses import NAIVE_SYSTEM_PROMPT
 
-        system, user_prompt = NAIVE_SYSTEM_PROMPT, build_user_prompt(question, context)
-    elif style == "standard":
-        system, user_prompt = base, build_user_prompt(question, context)
-    else:
-        raise ValueError(f"unknown prompt style {style!r}")
+        return NAIVE_SYSTEM_PROMPT, build_user_prompt(question, context)
+    if style == "standard":
+        return base, build_user_prompt(question, context)
+    raise ValueError(f"unknown prompt style {style!r}")
+
+
+def answer_from_context(
+    llm: LLM, question: str, context: List[Hit], style: str = "standard", subject: str = "book"
+) -> tuple:
+    """Returns (Answer, user_prompt); see build_prompts for style and subject."""
+    system, user_prompt = build_prompts(question, context, style, subject)
     result = llm.generate(system, user_prompt, max_output_tokens=600)
-    return (
-        Answer(
-            text=result.text,
-            cited=parse_citations(result.text, len(context)),
-            abstained=looks_like_abstention(result.text),
-            prompt_tokens=result.prompt_tokens,
-            output_tokens=result.output_tokens,
-        ),
-        user_prompt,
+    return answer_from_result(result, context), user_prompt
+
+
+def answer_from_result(result, context: List[Hit]) -> Answer:
+    """The Answer (citations, abstention, token counts) for a finished model result. Streaming ends
+    with the same result object, so a streamed answer is read exactly like a non-streamed one."""
+    return Answer(
+        text=result.text,
+        cited=parse_citations(result.text, len(context)),
+        abstained=looks_like_abstention(result.text),
+        prompt_tokens=result.prompt_tokens,
+        output_tokens=result.output_tokens,
     )

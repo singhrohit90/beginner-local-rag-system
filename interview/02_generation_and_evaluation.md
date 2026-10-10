@@ -339,14 +339,14 @@ How to read them:
 - What the repo does say: calls pass an output cap: `answer_from_context` uses `max_output_tokens=600`; each judge call uses `max_output_tokens=1500` (`judge.py`). `docs/backlog.md` says the reasoning model "sends its thinking separately, which must not be shown" and that `OpenAICompatLLM` in `rag/common/llm.py` waits for the whole reply today (no streaming). The extra token budget added by the client is described by the task owner but I did not verify it in code. Check `rag/common/llm.py` yourself before claiming specifics.
 - Judge calls also use `json_mode=True` and a tolerant `parse_json`, because reasoning or chatty models may wrap JSON in code fences.
 - Usage is recorded: `trace.config["usage"]` holds prompt and output tokens per answer (`RagPipeline.answer`).
-- Streaming is not built (backlog): it conflicts with `filter_output`, which judges the whole answer and can withhold it.
+- Streaming is built (2026-10-10): it conflicts with `filter_output`, which judges the whole answer and can withhold it, so a streaming version, `StreamGuard`, holds back risky pieces (`04_system_design_and_streaming.md`, section 8). Streamed answers are scored like any other: the final text is the same object the non-streaming path records.
 
 **In this repo.** `rag/query/generate.py` (`answer_from_context`), `rag/observe/generation_quality/judge.py`, `rag/query/pipeline.py` (`RagPipeline.answer`), `docs/backlog.md` (UI and API section). Model client: `rag/common/llm.py` (not read for this document).
 
 **Follow-ups.**
 
 - How do you know a truncated answer happened? (Check empty or cut output and token counts; in `score_answer` an exception becomes `pipeline_error`.)
-- Why not stream? (Output filter needs the whole answer; options in the backlog are buffer until the check passes, or stream and retract.)
+- How do you validate a streamed answer? (Hold-back guard online, the whole-answer check at the end, and the same judges offline on the final text; see `04_system_design_and_streaming.md`, section 8.)
 - Does the thinking affect cost? (Yes, output tokens; the usage numbers in the trace would show it. I did not aggregate them.)
 
 ---

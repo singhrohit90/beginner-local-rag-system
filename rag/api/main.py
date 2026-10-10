@@ -20,8 +20,9 @@ There is no login yet.
 """
 
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Sequence
+from typing import Any, Callable, Dict, Iterator, List, Optional, Sequence
 
+import json
 import logging
 import re
 import threading
@@ -29,8 +30,8 @@ from contextlib import asynccontextmanager
 from urllib.parse import urlparse
 
 from fastapi import APIRouter, BackgroundTasks, Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
-from fastapi.concurrency import run_in_threadpool
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.concurrency import iterate_in_threadpool, run_in_threadpool
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from pydantic import BaseModel, Field
 
@@ -51,6 +52,11 @@ def current_owner() -> str:
     replace this function and nothing else (docs/auth_plan.md); tests override it to act as two
     users. It must never read the owner from a header or a field the caller controls."""
     return LOCAL_OWNER
+
+
+def _sse(event: str, data: Dict[str, Any]) -> bytes:
+    """One server-sent event. json.dumps keeps the data on one line, so text with line breaks cannot end the frame."""
+    return f"event: {event}\ndata: {json.dumps(data)}\n\n".encode("utf-8")
 
 
 class AskRequest(BaseModel):
@@ -224,11 +230,48 @@ def create_app(
             raise HTTPException(409, str(err))
         except Exception as err:  # most often the model server being unreachable
             logger.exception("ask failed for %s", what)
-            # the caller gets the reason without internal addresses; the full error is in the server log
-            reason = re.sub(r"https?://\S+", "<url>", str(err))
-            if len(reason) > 4000:  # the page folds long text behind "more"; this only stops a huge dump
-                reason = reason[:4000].rsplit(" ", 1)[0] + " ..."
-            raise HTTPException(502, f"{type(err).__name__}: {reason}")
+            raise HTTPException(502, public_reason(err))
+
+    def public_reason(err: Exception) -> str:
+        """What the caller is told about a failure: the reason without internal addresses (the full
+        error is in the server log)."""
+        reason = re.sub(r"https?://\S+", "<url>", str(err))
+        if len(reason) > 4000:  # the page folds long text behind "more"; this only stops a huge dump
+            reason = reason[:4000].rsplit(" ", 1)[0] + " ..."
+        return f"{type(err).__name__}: {reason}"
+
+    def stream_request(request: AskRequest, start: Callable[[], Any], what: str) -> StreamingResponse:
+        """Validate, run retrieval (errors become proper HTTP statuses here), then stream the answer as
+        server-sent events: "token" events with text that passed the stream guard, then one "final"
+        event with the whole response, or one "error" event if the model fails part-way."""
+        if request.config not in USABLE_CONFIGS:
+            raise HTTPException(422, f"config must be one of {USABLE_CONFIGS}")
+        if request.style not in ("standard", "spotlight"):
+            raise HTTPException(422, "style must be standard or spotlight")
+        events = guarded(start, what)  # NotFound, BadUpload and retrieval failures end here, before any byte is sent
+        cancel = threading.Event()
+
+        def frames() -> Iterator[bytes]:
+            try:
+                for event in events:
+                    if cancel.is_set():  # the browser went away: stop, which closes the model connection
+                        break
+                    yield _sse(event["event"], event["data"])
+            except Exception as err:  # the model server failed part-way
+                logger.exception("stream failed for %s", what)
+                yield _sse("error", {"detail": public_reason(err)})
+            finally:
+                events.close()
+
+        async def body():
+            try:
+                async for frame in iterate_in_threadpool(frames()):
+                    yield frame
+            finally:
+                cancel.set()
+
+        return StreamingResponse(body(), media_type="text/event-stream",
+                                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
     @v1.post("/documents/{doc_id}/ask")
     def ask(doc_id: str, request: AskRequest, owner: str = Depends(current_owner)) -> Dict[str, Any]:
@@ -239,6 +282,18 @@ def create_app(
     def ask_across(request: AskAcrossRequest, owner: str = Depends(current_owner)) -> Dict[str, Any]:
         return answer_request(
             request, lambda: svc().ask_documents(owner, request.doc_ids, request.question, request.config, request.style),
+            "several documents")
+
+    @v1.post("/documents/{doc_id}/ask/stream")
+    def ask_stream(doc_id: str, request: AskRequest, owner: str = Depends(current_owner)) -> StreamingResponse:
+        return stream_request(
+            request, lambda: svc().ask_documents_stream(owner, [doc_id], request.question, request.config, request.style),
+            f"document {doc_id}")
+
+    @v1.post("/ask/stream")
+    def ask_across_stream(request: AskAcrossRequest, owner: str = Depends(current_owner)) -> StreamingResponse:
+        return stream_request(
+            request, lambda: svc().ask_documents_stream(owner, request.doc_ids, request.question, request.config, request.style),
             "several documents")
 
     @v1.post("/ask-about")
