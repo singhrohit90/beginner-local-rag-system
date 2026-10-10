@@ -29,6 +29,13 @@ every wrong answer can be traced to a stage.
 | `rag/experiments/` | scripts that run a whole comparison and print a table |
 | `rag/api/` | the web API and chat page: `service.py` (work), `main.py` (routes), `static/index.html` (UI) |
 
+## Design decisions
+
+- **Plain Python orchestration, no LangChain or LangGraph.** Each pipeline is a fixed sequence with a few switches (a config turns a stage on or off), so a short function chain over single-purpose step modules is easier to read, test and measure than a framework graph. Revisit LangGraph when the flow needs real branching: routing a question to different paths (for example the "about the documents" path in Step 10), loops such as retry or self-check, persistent state, or human approval.
+- **OpenSearch for vectors, our own fusion.** One system gives BM25, kNN and filters; fusion (`query/fusion.py`) stays in our code so experiments are comparable across the in-memory and OpenSearch stores. Each owner has separate indexes because Lucene's BM25 statistics are index-wide (Step 9).
+- **Evaluation reads traces.** Every question writes a trace; the `observe/` layer scores traces, so a wrong answer can be traced to the stage that caused it.
+- The longer reasons and the options that were rejected are in `docs/` (`about_the_documents.md`, `auth_plan.md`, `mcp_risks.md`) and in the interview notes, `interview/`.
+
 ## Read in this order
 
 1. `common/types.py`, `common/trace.py` (under 90 lines each): the two objects every step passes around.
