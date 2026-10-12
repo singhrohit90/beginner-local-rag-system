@@ -3,7 +3,8 @@
 Read `rag/README.md` ("Layout" and "Read in this order") before changing code.
 
 ## Commands
-- Run the tests with `python -m pytest tests -q`; the OpenSearch tests skip when the database is down, and the full run takes about 2 minutes with it up.
+- Run the tests with `python -m pytest tests -q`; the OpenSearch tests skip when the database is down, and the full run takes about 3 minutes on a quiet machine and 10 when other test runs share it. List them without running with `python -m pytest tests --collect-only -q`.
+- Run `/code-review ultra <base commit>` on a diff under 500 files and 8,000 changed lines; a bigger history is refused, so make local branches at the ends of windows (`git branch review/<name> <commit>`) and pass each window's starting commit.
 - Start the app with `RAG_STORE=opensearch python -m uvicorn rag.api.main:app --port 18642`; port 8000 is taken by another service on this machine.
 - Start OpenSearch with `cat docker-compose.yml | wsl -d Ubuntu-24.04 -- docker compose -f - up -d opensearch`; WSL cannot see the Windows drive, so pass the file on stdin.
 - Keep WSL awake with a background `wsl -d Ubuntu-24.04 -- sleep 100000`; WSL stops when idle and takes the OpenSearch container with it.
@@ -27,10 +28,18 @@ Read `rag/README.md` ("Layout" and "Read in this order") before changing code.
 - Return 404, not 403, for another owner's document, and filter by `Scope.owner` inside the store, not after the search.
 - Keep untrusted text in the DOM with `textContent`, never `innerHTML`, in `rag/api/static/index.html`.
 - Qualify upload chunk ids as `<doc_id>:<chunk_id>`; ids must be unique within an owner.
+- Stream answers only through `StreamGuard` in `rag/query/guard.py` and show them as text; text already sent cannot be recalled, and the output filter is a pattern list that review has bypassed repeatedly.
 
 ## Working in this repo
 - Do not push or open a pull request unless asked.
 - Write commit messages to a file and run `git commit -F <file>`; the hook blocks any command containing an email address, and the trailer has one.
-- Never name `rag/common/llm.py` or `tests/test_vllm.py` in a command or search; the hook flags them as secrets (a false positive), and only the user's `[allow-secret]` lifts it.
+- Never name `rag/common/llm.py` or `tests/test_vllm.py` in a command or search, and never glob `tests/` or `rag/common/`; the hook flags them as secrets (a false positive), and only a prompt that STARTS with `[allow-secret]` and names the file lifts it (it did not work for files under `.claude/worktrees/`, even with `[allow-all]`; the user then disabled the plugin with `/plugin` and `/reload-plugins`).
+- Do not read `HANDOFF.md` with the Read tool (the commit trailer's address trips the PII hook); change it with `sed -i`, or `rm` it and write a new one with the Write tool, without the literal address.
 - Write multi-file patch scripts with the Write tool and run them; long shell heredocs get truncated, and the shell halves backslashes, so edit backslash-heavy text with the Edit tool.
-- Prove a new regression test fails on the old code: `git stash push -q -- rag`, run the test, then `git stash pop -q`.
+- Prove a new regression test fails on the old code: `git stash push -q -m <unique-tag> -- rag`, run the test, then `git stash pop -q` (the stash stack is shared by every worktree, so always give it a unique message).
+- Create worktrees for parallel agents yourself, from the feature branch: `git worktree add -b work/<name> .claude/worktrees/<name> <branch>`; the harness default cuts them from `main`, which may lack the code. Merge them with `git merge --no-ff -F <file>`, then `git worktree remove --force` and `git branch -D` only after `git merge-base --is-ancestor <branch> <target>` (`git branch -d` checks the checked-out branch, not the target).
+- Put code-review fixes on a new branch cut from `main` and open a separate PR, so the diff shows what the review caught.
+- Run a script that uses `multiprocessing` (the extraction sandbox spawns children) from a file with `if __name__ == "__main__"`, never from stdin; spawn fails on Windows with `<stdin>`.
+- Make a timing-sensitive test wait for the state it checks (an Event, or polling a condition with a 30 s ceiling), not a fixed sleep; parallel agents load this machine and fixed waits were flaky.
+- Test "connection refused" by patching `urllib.request.urlopen` to raise `URLError(ConnectionRefusedError())`; a closed local port times out on this machine instead of being refused.
+- Keep `interview/` notes honest: label each point built, designed, general or not measured, and cite only real file paths and numbers recorded in the repo.
