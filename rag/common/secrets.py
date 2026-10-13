@@ -4,9 +4,19 @@
 """
 
 import os
+import re
 from pathlib import Path
 
 from rag.common.config import ROOT
+
+
+def _clean_value(value: str) -> str:
+    """A quoted value is kept as written; an unquoted one loses a trailing " # comment"."""
+    value = value.strip()
+    if value[:1] in ("'", '"'):
+        end = value.find(value[0], 1)
+        return value[1:end] if end > 0 else value[1:]
+    return re.split(r"\s#", value, maxsplit=1)[0].strip()
 
 
 def load_env(path: Path = ROOT / ".env") -> None:
@@ -18,7 +28,7 @@ def load_env(path: Path = ROOT / ".env") -> None:
         if not line or line.startswith("#") or "=" not in line:
             continue
         key, value = line.split("=", 1)
-        os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
+        os.environ.setdefault(key.strip(), _clean_value(value))
 
 
 def setting(name: str, default: str) -> str:
