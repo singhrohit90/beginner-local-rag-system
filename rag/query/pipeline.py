@@ -175,6 +175,8 @@ class RagPipeline:
             "abstained": answer.abstained,
             "blocked": blocked,
         }
+        if blocked:  # what the model really wrote, for measuring the filter; never sent to the caller
+            trace.config["usage"]["raw_answer"] = answer.text
         return trace
 
     def stream(self, trace: Trace) -> Iterator[Tuple[str, str]]:

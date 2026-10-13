@@ -35,6 +35,7 @@ from rag.query.generate import answer_from_context, looks_like_abstention
 from rag.common.llm import get_llm
 from rag.common.log import setup_logging
 from rag.common.secrets import setting
+from rag.query.rerank import CrossEncoderReranker
 from rag.query.pipeline import RetrievalPipeline
 from rag.security.defenses import classify
 from rag.query.guard import filter_output
@@ -81,7 +82,7 @@ def pipeline_with(base: RetrievalPipeline, extra: List[Chunk], embedder: Embedde
     store.upsert(f"poison-{extra[0].meta['poison']}", base.scope.owner, extra,
                  embedder.embed_documents([c.text for c in extra]), embedder.name,
                  info=base.store.describe(base.scope))
-    return RetrievalPipeline(store, embedder, base.scope, None)
+    return RetrievalPipeline(store, embedder, base.scope, base.reranker)
 
 
 @dataclass
@@ -149,9 +150,11 @@ def audit_output_filter(run_dir: Path) -> Optional[Dict[str, Any]]:
             continue
         trace = json.loads((run_dir / "traces" / f"{row['id']}.json").read_text(encoding="utf-8"))
         context = next(s for s in trace["stages"] if s["name"] == "context")
-        result = filter_output(row["answer"], " ".join(h["text"] for h in context["hits"]))
+        # A run made with the filter on stores the placeholder in "answer"; the model's own text is "raw_answer".
+        text = row.get("raw_answer") or row["answer"]
+        result = filter_output(text, " ".join(h["text"] for h in context["hits"]))
         if result.blocked:
-            blocked.append((row["id"], result.reasons, row["answer"][:100].replace("\n", " ")))
+            blocked.append((row["id"], result.reasons, text[:100].replace("\n", " ")))
     return {"answers_checked": sum(1 for r in rows if not r.get("abstained") and r.get("answer")),
             "blocked": blocked}
 
@@ -172,9 +175,10 @@ def main() -> None:
 
     embedder = get_embedder(args.embedder)
     chunkset = load_chunkset(args.chunks_dir, args.chunker)
-    base = RetrievalPipeline.from_chunkset(chunkset, get_index(chunkset, embedder, "plain", False), embedder)
-    llm = get_llm(args.llm)
     config = CONFIGS[args.config]
+    reranker = CrossEncoderReranker() if config.rerank else None  # the rerank configs need one
+    base = RetrievalPipeline.from_chunkset(chunkset, get_index(chunkset, embedder, "plain", False), embedder, reranker)
+    llm = get_llm(args.llm)
     defenses = [d.strip() for d in args.defenses.split(",")]
 
     cache: Dict[str, Any] = {}

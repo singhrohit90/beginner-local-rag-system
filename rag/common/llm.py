@@ -165,6 +165,7 @@ class OllamaLLM:
 
 DEFAULT_REMOTE_URL = "http://127.22.10.1:30007/v1"
 DEFAULT_REMOTE_MODEL = "/models/gpt-oss-20b"
+DEFAULT_REASONING_BUDGET = 3000
 
 
 class OpenAICompatLLM:
@@ -196,7 +197,7 @@ class OpenAICompatLLM:
         self.name = f"vllm:{self._model}"
         self._base = (base_url or os.environ.get("REMOTE_URL", DEFAULT_REMOTE_URL)).rstrip("/")
         self._key = api_key if api_key is not None else os.environ.get("REMOTE_API_KEY", "")
-        self._budget = int(reasoning_budget or os.environ.get("REMOTE_REASONING_BUDGET", 3000))
+        self._budget = int(reasoning_budget or os.environ.get("REMOTE_REASONING_BUDGET", DEFAULT_REASONING_BUDGET))
         self._effort = reasoning_effort or os.environ.get("REMOTE_REASONING_EFFORT") or None
         self._timeout = timeout
         self._retries = retries
@@ -205,7 +206,14 @@ class OpenAICompatLLM:
     def cache_salt(self) -> str:
         """Settings that change the answer without changing the model name. Empty by default, so
         existing cache entries stay valid."""
-        return f"effort={self._effort}" if self._effort else ""
+        parts = []
+        if self._effort:
+            parts.append(f"effort={self._effort}")
+        if self._budget != DEFAULT_REASONING_BUDGET:
+            parts.append(f"budget={self._budget}")
+        if self._base != DEFAULT_REMOTE_URL.rstrip("/"):
+            parts.append(f"url={self._base}")
+        return ",".join(parts)
 
     def _headers(self) -> dict:
         headers = {"Content-Type": "application/json"}
@@ -371,8 +379,8 @@ class OpenAICompatLLM:
             message = choice.get("message", {})
             text = (message.get("content") or "").strip()
             finish = str(choice.get("finish_reason", ""))
-            if finish == "length" and not text:
-                continue  # the thinking used up the whole budget, so retry with more room
+            if finish == "length":
+                continue  # the thinking used up the budget, so retry with more room; never return half an answer
             usage = body.get("usage") or {}
             return LLMResult(
                 text=text,
