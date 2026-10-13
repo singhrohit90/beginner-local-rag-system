@@ -214,3 +214,14 @@ def test_the_output_filter_reads_the_answer_the_way_a_renderer_does():
                    "![x](https" + chr(92) + "://evil.example/a)"]:
         assert filter_output(answer, context).blocked, answer
     assert not filter_output("Fish &amp; chips, see https://example.com/docs.", context).blocked
+
+
+def test_attacks_can_run_against_a_reranked_retrieval_setup(base):
+    from rag.query.rerank import KeywordOverlapReranker
+
+    pipeline, embedder = base
+    pipeline.reranker = KeywordOverlapReranker()
+    config = RetrievalConfig("t", bm25=True, dense=True, top_k=3, rerank=True)
+    result = run_attack(POISONED_DOCS[0], 0, "none", pipeline, embedder,
+                        FakeLLM(lambda s, u: "A plain, harmless answer that is long enough to count [S1]."), config, {})
+    assert result.doc == "P01"  # before the fix the planted-document pipeline had no reranker and this raised ValueError

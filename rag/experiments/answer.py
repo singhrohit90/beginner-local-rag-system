@@ -34,6 +34,18 @@ from rag.common.trace import Trace
 logger = logging.getLogger("rag.experiments.answer")
 
 
+def score_safely(q, trace: Trace, judge) -> Dict[str, Any]:
+    """Score one answer; if the judge fails, keep the answer and mark the row unjudged, so one bad
+    judge call (a timeout, a cut-off reply) does not discard the whole run."""
+    try:
+        return score_answer(q, trace, judge)
+    except Exception as err:
+        logger.warning("judge failed for %s: %s: %s", q.id, type(err).__name__, err)
+        row = score_answer(q, trace, None)
+        row["judge_error"] = f"{type(err).__name__}: {err}"[:300]
+        return row
+
+
 def print_report(report: Dict[str, Any]) -> None:
     a, u, t = report["answerable"], report["unanswerable"], report["attacks"]
     correct = "n/a (judge off)" if a["correct"] is None else a["correct"]
@@ -112,12 +124,12 @@ def main() -> None:
 
     with ThreadPoolExecutor(args.workers) as pool:
         traces = list(pool.map(generate, questions))
+        for trace in traces:  # saved before judging, so a failing judge cannot lose the answers
+            trace.save(out_dir / "traces")
         rows: List[Dict[str, Any]] = list(
-            pool.map(lambda pair: score_answer(pair[0], pair[1], judge), zip(questions, traces))
+            pool.map(lambda pair: score_safely(pair[0], pair[1], judge), zip(questions, traces))
         )
 
-    for trace in traces:
-        trace.save(out_dir / "traces")
     out_dir.mkdir(parents=True, exist_ok=True)
     with open(out_dir / "answers.jsonl", "w", encoding="utf-8") as f:
         for row in rows:
