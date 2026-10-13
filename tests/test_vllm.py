@@ -4,7 +4,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
-from rag.common.llm import CachedLLM, OpenAICompatLLM, get_llm
+from rag.common.llm import DEFAULT_REMOTE_URL, CachedLLM, OpenAICompatLLM, get_llm
 
 
 class FakeVllm(BaseHTTPRequestHandler):
@@ -92,10 +92,24 @@ def test_truncated_empty_answer_is_retried_with_a_bigger_budget_then_raised(serv
         llm_for(server).generate("s", "u")
 
 
-def test_a_partial_but_nonempty_answer_that_hit_the_limit_is_returned_with_its_finish_reason(server):
-    FakeVllm.replies = [body("Half an ans", finish="length")]
-    result = llm_for(server).generate("s", "u")
-    assert result.text == "Half an ans" and result.finish_reason == "length"
+def test_a_partial_answer_that_hit_the_limit_is_retried_and_never_returned_as_complete(server):
+    FakeVllm.replies = [body("Half an ans", finish="length"), body("The whole answer.")]
+    assert llm_for(server).generate("s", "u").text == "The whole answer."
+    assert len(FakeVllm.seen) == 2
+    FakeVllm.seen.clear()
+    FakeVllm.replies = [body("Half an ans", finish="length"), body("Half an answer still", finish="length")]
+    with pytest.raises(RuntimeError, match="cut off by max_tokens"):
+        llm_for(server).generate("s", "u")
+
+
+def test_the_cache_salt_covers_effort_budget_and_server_but_is_empty_by_default(server):
+    assert llm_for(server).cache_salt.startswith("url=")  # the test server is not the default one
+    def make(**kw):
+        return OpenAICompatLLM(base_url=DEFAULT_REMOTE_URL, reasoning_effort=None, **kw)
+
+    assert make(reasoning_budget=3000).cache_salt == ""
+    assert make(reasoning_budget=1000).cache_salt == "budget=1000"
+    assert OpenAICompatLLM(base_url=DEFAULT_REMOTE_URL, reasoning_budget=3000, reasoning_effort="low").cache_salt == "effort=low"
 
 
 def test_server_errors_are_retried_but_client_errors_are_not(server, monkeypatch):
