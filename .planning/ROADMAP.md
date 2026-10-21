@@ -88,16 +88,20 @@ Plans:
 **Wave 4** *(blocked on Wave 3 completion)*
 - [ ] 02-04-PLAN.md — Wire service.py and main.py: conversation_id on four routes, history block, stored turns, 404/409 mappings, delete under the store lock, budget refusal (wave 4)
 
-**Wave 5** *(blocked on Wave 4 completion)*
+**Wave 5** *(blocked on Wave 4 completion; the test plans 02-05 to 02-08 run one per wave because each fail-first proof checks rag/ files out in the shared working tree)*
 - [ ] 02-05-PLAN.md — tests/test_api.py: history window in the trace, one 404 for every miss, 512/513 limit, delete cascade, duplicate ids (wave 5)
-- [ ] 02-06-PLAN.md — tests/test_stream_api.py: id on all four routes, separate conversations, errors before any SSE byte, stored streamed answer (wave 5)
-- [ ] 02-07-PLAN.md — tests/test_conversations.py (new): turn record, stale reads, traces off, cascade, prompts with history, defang, no disk cache (wave 5)
 
 **Wave 6** *(blocked on Wave 5 completion)*
-- [ ] 02-08-PLAN.md — tests/test_conversations.py: delete races, busy conversation, lease release paths, caps, oversize follow-up, worst-case budget (wave 6)
+- [ ] 02-06-PLAN.md — tests/test_stream_api.py: id on all four routes, separate conversations, errors before any SSE byte, stored streamed answer (wave 6)
 
 **Wave 7** *(blocked on Wave 6 completion)*
-- [ ] 02-09-PLAN.md — Phase gate: full suite, retrieval invariant, snapshot, prohibition checks; Phase 2 baseline and D-11 owner flag in STATE.md (wave 7)
+- [ ] 02-07-PLAN.md — tests/test_conversations.py (new): turn record, stale reads, traces off, cascade, prompts with history, defang, no disk cache (wave 7)
+
+**Wave 8** *(blocked on Wave 7 completion)*
+- [ ] 02-08-PLAN.md — tests/test_conversations.py: delete races, busy conversation, lease release paths, caps, oversize follow-up, worst-case budget (wave 8)
+
+**Wave 9** *(blocked on Wave 8 completion)*
+- [ ] 02-09-PLAN.md — Phase gate: full suite, retrieval invariant, snapshot, prohibition checks; Phase 2 baseline and D-11 owner flag in STATE.md (wave 9)
 
 **Open decisions**: D1 (cross-document storage), D3 (cap and window numbers); smaller points listed under Open Decisions below.
 
