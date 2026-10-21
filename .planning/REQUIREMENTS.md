@@ -98,30 +98,30 @@ Which phases cover which requirements. Updated during roadmap creation.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| CONV-01 | TBD | Pending |
-| CONV-02 | TBD | Pending |
-| CONV-03 | TBD | Pending |
-| CONV-04 | TBD | Pending |
-| RWR-01 | TBD | Pending |
-| RWR-02 | TBD | Pending |
-| RWR-03 | TBD | Pending |
-| RWR-04 | TBD | Pending |
-| PRMT-01 | TBD | Pending |
-| PRMT-02 | TBD | Pending |
-| PRMT-03 | TBD | Pending |
-| PRMT-04 | TBD | Pending |
-| EVAL-01 | TBD | Pending |
-| EVAL-02 | TBD | Pending |
-| EVAL-03 | TBD | Pending |
-| PAGE-01 | TBD | Pending |
-| PAGE-02 | TBD | Pending |
-| DOCS-01 | TBD | Pending |
+| CONV-01 | Phase 2 | Pending |
+| CONV-02 | Phase 2 | Pending |
+| CONV-03 | Phase 2 | Pending |
+| CONV-04 | Phase 2 | Pending |
+| RWR-01 | Phase 3 | Pending |
+| RWR-02 | Phase 3 | Pending |
+| RWR-03 | Phase 3 | Pending |
+| RWR-04 | Phase 3 | Pending |
+| PRMT-01 | Phase 2 | Pending |
+| PRMT-02 | Phase 1 | Pending |
+| PRMT-03 | Phase 2 | Pending |
+| PRMT-04 | Phase 2 | Pending |
+| EVAL-01 | Phase 4 | Pending |
+| EVAL-02 | Phase 4 | Pending |
+| EVAL-03 | Phase 4 | Pending |
+| PAGE-01 | Phase 5 | Pending |
+| PAGE-02 | Phase 5 | Pending |
+| DOCS-01 | Phase 5 | Pending |
 
 **Coverage:**
 - v1 requirements: 18 total
-- Mapped to phases: 0
-- Unmapped: 18 ⚠️ (filled by roadmap creation)
+- Mapped to phases: 18
+- Unmapped: 0
 
 ---
 *Requirements defined: 2026-10-21*
-*Last updated: 2026-10-21 after initial definition*
+*Last updated: 2026-10-21 after roadmap creation (traceability filled)*
