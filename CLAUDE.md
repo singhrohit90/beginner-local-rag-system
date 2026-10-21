@@ -43,3 +43,8 @@ Read `rag/README.md` ("Layout" and "Read in this order") before changing code.
 - Make a timing-sensitive test wait for the state it checks (an Event, or polling a condition with a 30 s ceiling), not a fixed sleep; parallel agents load this machine and fixed waits were flaky.
 - Test "connection refused" by patching `urllib.request.urlopen` to raise `URLError(ConnectionRefusedError())`; a closed local port times out on this machine instead of being refused.
 - Keep `interview/` notes honest: label each point built, designed, general or not measured, and cite only real file paths and numbers recorded in the repo.
+
+## flow runs
+- GSD (`/gsd-*`) owns structure, planning and execution; superpowers owns brainstorming for gaps, TDD and verification; `flow` owns the two gates and calls both explicitly.
+- A `/flow` run pushes `flow/<slug>` after each merged wave and opens the PR at the merge gate; `main` is never pushed by a run.
+- Verification gate for this repo: `python -m pytest tests -q` (baseline 591 passed, 2 skipped); `python -m rag.experiments.retrieval --chunkers semantic --configs weighted` (hit@5 0.865, mrr 0.663); `python -m rag.common.llm_check` (needs tunnel: yes; tunnel session: set on first use); output saved under `.planning/runs/<id>/`.
