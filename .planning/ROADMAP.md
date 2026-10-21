@@ -73,7 +73,31 @@ Scope note (not a criterion): this phase also lands the pure history helpers (wi
   4. A stored turn that contains an injected instruction or a stale `[S n]` citation marker reaches the next prompt only after scanning and defanging, with the markers stripped, and streamed answers still reach the client only through `StreamGuard`.
   5. A conversation that reaches the turn or word cap is refused with a clear error status before any model call and before any SSE byte, and a worst-case budget test shows history plus passages plus the 3000 thinking tokens plus the answer budget fits the recorded context window.
 
-**Plans**: TBD
+**Plans:** 9 plans
+
+Plans:
+**Wave 1**
+- [ ] 02-01-PLAN.md — Phase 1 contract check, P2_BASE record, context window in force for Phase 2 (docs/models.md, STATE.md) (wave 1)
+
+**Wave 2** *(blocked on Wave 1 completion)*
+- [ ] 02-02-PLAN.md — rag/query/history.py: THINKING_TOKENS, ANSWER_TOKENS, CONVERSATION_MAX_STORED_WORDS, estimate_prompt_tokens, fits_context, block_turns (wave 2)
+
+**Wave 3** *(blocked on Wave 2 completion)*
+- [ ] 02-03-PLAN.md — rag/api/conversations.py store: D-01 checkpoint (auto owner-folder), owner/scope lookup, lease, caps, atomic writes, delete cascade (wave 3)
+
+**Wave 4** *(blocked on Wave 3 completion)*
+- [ ] 02-04-PLAN.md — Wire service.py and main.py: conversation_id on four routes, history block, stored turns, 404/409 mappings, delete under the store lock, budget refusal (wave 4)
+
+**Wave 5** *(blocked on Wave 4 completion)*
+- [ ] 02-05-PLAN.md — tests/test_api.py: history window in the trace, one 404 for every miss, 512/513 limit, delete cascade, duplicate ids (wave 5)
+- [ ] 02-06-PLAN.md — tests/test_stream_api.py: id on all four routes, separate conversations, errors before any SSE byte, stored streamed answer (wave 5)
+- [ ] 02-07-PLAN.md — tests/test_conversations.py (new): turn record, stale reads, traces off, cascade, prompts with history, defang, no disk cache (wave 5)
+
+**Wave 6** *(blocked on Wave 5 completion)*
+- [ ] 02-08-PLAN.md — tests/test_conversations.py: delete races, busy conversation, lease release paths, caps, oversize follow-up, worst-case budget (wave 6)
+
+**Wave 7** *(blocked on Wave 6 completion)*
+- [ ] 02-09-PLAN.md — Phase gate: full suite, retrieval invariant, snapshot, prohibition checks; Phase 2 baseline and D-11 owner flag in STATE.md (wave 7)
 
 **Open decisions**: D1 (cross-document storage), D3 (cap and window numbers); smaller points listed under Open Decisions below.
 
