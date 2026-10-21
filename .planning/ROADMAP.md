@@ -42,8 +42,8 @@ Plans:
 - [ ] 01-03-PLAN.md — history_block seam through the four prompt builders and RagPipeline.answer/stream, empty default byte-identical (wave 2)
 - [ ] 01-04-PLAN.md — Seam tests: empty == no argument == snapshot, block position in every style, pipeline forwarding (wave 3)
 - [ ] 01-05-PLAN.md — Pure rag/query/history.py: HistoryTurn, window, neutralize, render_block, D-10 budget constants (wave 2)
-- [ ] 01-06-PLAN.md — History unit tests and the worst-case context-window budget test (wave 3)
-- [ ] 01-07-PLAN.md — Retrieval invariant run 2, full suite, phase prohibition checks, baseline recorded for Phase 2 (wave 4)
+- [ ] 01-06-PLAN.md — History unit tests and the worst-case context-window budget test (wave 4; after 01-04 so their fail-first checkouts never overlap)
+- [ ] 01-07-PLAN.md — Retrieval invariant run 2, full suite, phase prohibition checks, baseline recorded for Phase 2 (wave 5)
 
 Scope note (not a criterion): this phase also lands the pure history helpers (window, neutralize, render) and the budget constants as unwired groundwork. The requirements that use them (history in the prompt, untrusted history, budget) are verified end to end in Phase 2.
 

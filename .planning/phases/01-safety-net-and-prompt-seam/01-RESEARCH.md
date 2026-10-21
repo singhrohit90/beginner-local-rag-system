@@ -368,16 +368,19 @@ Not a rename/migration phase: omitted by instruction.
 | A6 | Forwarding `history_block` to the `naive` style (contrary to ARCHITECTURE.md:178) is acceptable | Pattern 1 | Planner may prefer to ignore it for `naive`; change one line and drop it from the identity test's non-empty cases |
 | A7 | OpenSearch is down on the executor's machine, so the baseline stays 591 passed, 2 skipped | Pitfall 8 | Different pass/skip split; record the actual line |
 
-## Open Questions
+## Open Questions (RESOLVED)
 
 1. **Will the tunnel be up when plan B runs?**
    - What we know: it was refused during research (WinError 10061); `STATE.md` already lists this as a blocker; D-13 defines the fallback.
    - What's unclear: whether the user reconnects before execution.
    - Recommendation: write plan B to try once, branch on the result, never block (no `checkpoint:human-action`), and let Phase 2 start by re-reading.
+   - RESOLVED by D-13 and plan 01-02: one probe attempt, four recorded outcomes (read, tunnel down, other failure, hook block), no `checkpoint:human-action`; the not-read path writes the dated sentence and the 8192 floor into `docs/models.md` and a Phase 2 start line into `STATE.md`.
 2. **Does the live question need its own word cap in `history.py`?**
    - What we know: the API cap is 2000 characters; D-10 defines no live-question constant.
    - Recommendation: do not add one in Phase 1 (scope); make the budget test use the 2000-character case and hand the cap to Phase 2.
+   - RESOLVED by plan 01-06: no live-question constant in Phase 1; `test_worst_case_prompt_fits_the_context_window` runs a 60-word and a 2000-character question through the real seam; refusing an oversized prompt is Phase 2's hard cap (PRMT-04).
 3. **`naive` style and a non-empty block** (A6): planner's call; the recommendation is to forward.
+   - RESOLVED by plan 01-03 ("Decision recorded: naive style forwards the block"): `naive` forwards `history_block` like the other two styles, and plan 01-04's identity and position tests cover it.
 
 ## Environment Availability
 
