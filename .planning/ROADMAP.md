@@ -34,7 +34,16 @@ Decimal phases appear between their surrounding integers in numeric order.
   2. After the seam edits, the prompt builders called with an explicitly empty history return exactly the same bytes as when called with no history argument, and both equal the committed snapshot (an empty history adds no header and no blank line).
   3. `python -m rag.experiments.retrieval --chunkers semantic --configs weighted` still prints hit@5 0.865 and mrr 0.663, and `python -m pytest tests -q` still reports 591 passed, 2 skipped; both results are recorded for later phases to compare against.
   4. The model server's context window (`max_model_len`) is read once and written into `docs/models.md`, so the history caps pinned in Phase 2 rest on a recorded number, not a guess.
-**Plans**: TBD
+**Plans:** 7 plans
+
+Plans:
+- [ ] 01-01-PLAN.md — Snapshot of single-turn prompt bytes (24 cases + 45 golden digests) committed on unedited code; retrieval invariant run 1 (wave 1)
+- [ ] 01-02-PLAN.md — Read max_model_len once and record it (or the dated not-read reason and 8192 floor) in docs/models.md and STATE.md (wave 1)
+- [ ] 01-03-PLAN.md — history_block seam through the four prompt builders and RagPipeline.answer/stream, empty default byte-identical (wave 2)
+- [ ] 01-04-PLAN.md — Seam tests: empty == no argument == snapshot, block position in every style, pipeline forwarding (wave 3)
+- [ ] 01-05-PLAN.md — Pure rag/query/history.py: HistoryTurn, window, neutralize, render_block, D-10 budget constants (wave 2)
+- [ ] 01-06-PLAN.md — History unit tests and the worst-case context-window budget test (wave 3)
+- [ ] 01-07-PLAN.md — Retrieval invariant run 2, full suite, phase prohibition checks, baseline recorded for Phase 2 (wave 4)
 
 Scope note (not a criterion): this phase also lands the pure history helpers (window, neutralize, render) and the budget constants as unwired groundwork. The requirements that use them (history in the prompt, untrusted history, budget) are verified end to end in Phase 2.
 
