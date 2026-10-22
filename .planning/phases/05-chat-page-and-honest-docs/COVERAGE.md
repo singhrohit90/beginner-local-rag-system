@@ -1,0 +1,1 @@
+No external API integration: edits the project's own chat page (rag/api/static/index.html) to call the project's own unchanged /v1 ask routes, adds tests that stub those routes, and updates repository docs; no external API, SDK or service is added or newly called.
