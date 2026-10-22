@@ -154,7 +154,32 @@ Plans:
   4. The rewrite switch's default follows the rule: on only if the gain clears the band, otherwise off with the numbers recorded; the rewriter model and the question slot in the answer prompt are decided from the recorded latency and quality numbers.
   5. Replaying the existing 37 answerable questions as first turns of a conversation with rewriting on gives the same retrieval as with it off, and hit@5 0.865 / mrr 0.663 on the single-turn command are unchanged.
 
-**Plans**: TBD
+**Plans:** 10 plans
+
+Plans:
+**Wave 1**
+- [ ] 04-01-PLAN.md — Phase 1-3 contract check, P4_BASE, rag/observe/golden_conversations.py: schema, validation, GoldQuestion adapter, page-check CLI (wave 1)
+- [ ] 04-02-PLAN.md — docs/chat_memory_eval.md: the shipping rule committed alone before any scored run (wave 1)
+
+**Wave 2** *(blocked on Wave 1 completion)*
+- [ ] 04-03-PLAN.md — rag/experiments/conversation.py part 1: four arms on teacher-forced histories, strict scoring, rewrite and clarify scoring, regression arm, rule guard, preflight, --check-set (wave 2)
+
+**Wave 3** *(blocked on Wave 2 completion)*
+- [ ] 04-04-PLAN.md — rag/experiments/conversation.py part 2: paired stats, sign test, evaluate_rule, repeats, fact-checklist answers, rewriter choice, render_results (wave 3)
+- [ ] 04-05-PLAN.md — data/golden/ddia_conversations.jsonl and MULTITURN_REVIEW.md: author, page-check, rule-first checkpoint, --check-set discrimination, freeze (wave 3)
+
+**Wave 4** *(blocked on Wave 3 completion)*
+- [ ] 04-06-PLAN.md — tests/test_golden_conversations.py: reject table, edges, load_golden unchanged, committed set (wave 4)
+- [ ] 04-07-PLAN.md — tests/test_conversation_experiment.py: offline smoke, arms, history, tables, fallback, clarify, answers, rule table, guard, regression (wave 4)
+
+**Wave 5** *(blocked on Wave 4 completion)*
+- [ ] 04-08-PLAN.md — Live scored run (qwen, gpt-oss comparison if the tunnel is up), Results committed below the rule, STATE.md blocker for skipped arms (wave 5)
+
+**Wave 6** *(blocked on Wave 5 completion)*
+- [ ] 04-09-PLAN.md — Apply the decision: default-matches-decision test; flip, rewriter default or question slot only if the Results require it (wave 6)
+
+**Wave 7** *(blocked on Wave 6 completion)*
+- [ ] 04-10-PLAN.md — Phase gate: full suite, retrieval invariant, regression replay, rule-first check, prohibitions; Phase 4 baseline and owner flag in STATE.md (wave 7)
 
 Scope note (not a criterion): golden-item authoring starts during Phase 3 on purpose, so the rewriter is not tuned to its own examples; the set is complete and loaded here.
 
