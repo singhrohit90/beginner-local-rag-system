@@ -48,6 +48,11 @@ def format_context(hits: List[Hit]) -> str:
     return "\n\n".join(blocks)
 
 
-def build_user_prompt(question: str, hits: List[Hit]) -> str:
+def build_user_prompt(question: str, hits: List[Hit], history_block: str = "") -> str:
+    """history_block is a block of earlier turns already rendered by rag.query.history.render_block
+    (its own header and trailing blank line included). An empty block returns today's prompt byte
+    for byte, so single-turn prompts, golden results and LLM cache keys do not change."""
     context = format_context(hits) if hits else "(no passages were retrieved)"
-    return f"Context passages:\n\n{context}\n\nQuestion: {question}"
+    if not history_block:
+        return f"Context passages:\n\n{context}\n\nQuestion: {question}"
+    return f"Context passages:\n\n{context}\n\n{history_block}Question: {question}"

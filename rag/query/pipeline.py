@@ -151,12 +151,13 @@ class RagPipeline:
     def run(self, query_id: str, question: str, config: RetrievalConfig) -> Trace:
         return self.answer(self.retrieval.run(query_id, question, config))
 
-    def answer(self, trace: Trace) -> Trace:
-        """Generate from the context already recorded in a retrieval trace."""
+    def answer(self, trace: Trace, history_block: str = "") -> Trace:
+        """Generate from the context already recorded in a retrieval trace. history_block (earlier
+        turns, already rendered) is passed through unchanged and lands in trace.prompt."""
         question = trace.question
         context = trace.stage("context").hits
         answer, prompt = answer_from_context(self.llm, question, context, style=self.style,
-                                           subject=self.subject)
+                                           subject=self.subject, history_block=history_block)
         trace.answer = answer.text
         blocked: List[str] = []
         if self.output_filter:
@@ -179,7 +180,7 @@ class RagPipeline:
             trace.config["usage"]["raw_answer"] = answer.text
         return trace
 
-    def stream(self, trace: Trace) -> Iterator[Tuple[str, str]]:
+    def stream(self, trace: Trace, history_block: str = "") -> Iterator[Tuple[str, str]]:
         """Generate from the context in a retrieval trace, as a stream of events:
 
             ("token", text)     text that is safe to show now (it has passed the stream guard)
@@ -189,9 +190,12 @@ class RagPipeline:
 
         The guard (rag.query.guard.StreamGuard) holds back anything that could be the start of a
         risky piece until it is judged, so a blocked answer has not already leaked a link. If the
-        guard blocks, generation is stopped (the model connection is closed)."""
+        guard blocks, generation is stopped (the model connection is closed).
+
+        history_block is passed through to the prompt exactly as answer() does, so a streamed and an
+        ordinary answer send the same prompt."""
         context = trace.stage("context").hits
-        system, prompt = build_prompts(trace.question, context, self.style, self.subject)
+        system, prompt = build_prompts(trace.question, context, self.style, self.subject, history_block=history_block)
         guard = StreamGuard(" ".join(h.text for h in context)) if self.output_filter else None
         pieces = stream_answer(self.llm, system, prompt, max_output_tokens=600)
         result: Optional[LLMResult] = None
