@@ -25,6 +25,8 @@ from rag.common.config import GOLDEN_DIR
 from rag.common.types import Hit
 from rag.observe.golden import load_golden
 from rag.query.generate import build_prompts
+from rag.query.prompt import build_user_prompt
+from rag.security.defenses import spotlight_user_prompt
 
 SNAPSHOT_DIR = Path(__file__).parent / "snapshots" / "prompts"
 DIGEST_FILE = SNAPSHOT_DIR / "golden_user_prompt_digests.json"
@@ -132,3 +134,15 @@ def test_golden_user_prompts_match_committed_digests():
 def test_snapshot_directory_holds_exactly_the_committed_cases():
     assert len(CASES) == 24
     assert sorted(p.name for p in SNAPSHOT_DIR.iterdir()) == sorted([c.path.name for c in CASES] + [DIGEST_FILE.name])
+
+
+@pytest.mark.parametrize("case", CASES, ids=[c.id for c in CASES])
+def test_empty_history_equals_no_history_equals_snapshot(case):
+    """D-07: an empty history block adds nothing. Omitted, "" and None give the snapshot bytes; a careless
+    caller passing None must get the old prompt, not the text "None"."""
+    without = render_case(case)
+    explicit = build_prompts(QUESTION, case.hits, case.style, case.subject, history_block="")
+    none_given = build_prompts(QUESTION, case.hits, case.style, case.subject, history_block=None)
+    assert without == explicit == none_given == load_snapshot(case)
+    builder = spotlight_user_prompt if case.style == "spotlight" else build_user_prompt
+    assert builder(QUESTION, case.hits) == builder(QUESTION, case.hits, history_block="") == load_snapshot(case)[1]
