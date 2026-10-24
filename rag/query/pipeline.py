@@ -180,7 +180,7 @@ class RagPipeline:
             trace.config["usage"]["raw_answer"] = answer.text
         return trace
 
-    def stream(self, trace: Trace) -> Iterator[Tuple[str, str]]:
+    def stream(self, trace: Trace, history_block: str = "") -> Iterator[Tuple[str, str]]:
         """Generate from the context in a retrieval trace, as a stream of events:
 
             ("token", text)     text that is safe to show now (it has passed the stream guard)
@@ -190,9 +190,12 @@ class RagPipeline:
 
         The guard (rag.query.guard.StreamGuard) holds back anything that could be the start of a
         risky piece until it is judged, so a blocked answer has not already leaked a link. If the
-        guard blocks, generation is stopped (the model connection is closed)."""
+        guard blocks, generation is stopped (the model connection is closed).
+
+        history_block is passed through to the prompt exactly as answer() does, so a streamed and an
+        ordinary answer send the same prompt."""
         context = trace.stage("context").hits
-        system, prompt = build_prompts(trace.question, context, self.style, self.subject)
+        system, prompt = build_prompts(trace.question, context, self.style, self.subject, history_block=history_block)
         guard = StreamGuard(" ".join(h.text for h in context)) if self.output_filter else None
         pieces = stream_answer(self.llm, system, prompt, max_output_tokens=600)
         result: Optional[LLMResult] = None
