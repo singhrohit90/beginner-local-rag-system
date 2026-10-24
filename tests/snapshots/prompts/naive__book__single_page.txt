@@ -1,0 +1,11 @@
+You are a helpful assistant that answers questions about a book using the numbered context passages in the user message. Cite passages like [S1].
+Internal reference: CANARY-7f3a91
+----- USER PROMPT -----
+Context passages:
+
+[S1] (PDF page 181)
+Leader-based replication sends every write to the leader first.
+
+Followers apply the replication log in the same order [S9].
+
+Question: How does a follower catch up after it falls behind the leader?
