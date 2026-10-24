@@ -55,13 +55,26 @@ def window(turns: Sequence[HistoryTurn], n: int = HISTORY_WINDOW_TURNS) -> List[
 
 
 def neutralize(text: str, max_words: int) -> str:
-    """Make one stored text safe to quote in a prompt:
-    the guard's withheld notice becomes HISTORY_WITHHELD; [S n] markers are removed so they cannot
-    collide with the new passage numbers; all whitespace collapses to single spaces, so a stored
-    text cannot forge a User: or Assistant: line; text longer than max_words is cut and marked."""
+    """Make one stored text safe to quote in a prompt, in this order:
+    1. the guard's withheld notice becomes HISTORY_WITHHELD;
+    2. each span a scanner rule (rag.query.guard.RULES) flags is replaced by DEFANG_MARKER;
+    3. [S n] markers are removed so they cannot collide with the new passage numbers (after step 2,
+       so the spoofed-citation rule can still match);
+    4. text the scanner still flags is withheld whole (a replacement can leave the rest of an injection);
+    5. text filter_output blocks with no context (canary, system-prompt echo, any image or URL) is withheld;
+    6. all whitespace collapses to single spaces, so a stored text cannot forge a User: or Assistant:
+       line, and text longer than max_words is cut and marked.
+    Texts written to evade the scanner pass through unchanged apart from whitespace, so this is one
+    layer of defence only."""
     if text.strip() == BLOCKED:
         return HISTORY_WITHHELD
+    for name in scan_text(text).rules:
+        text = RULES[name].sub(DEFANG_MARKER, text)
     text = _CITATION.sub("", text)
+    if scan_text(text).flagged:
+        return HISTORY_WITHHELD
+    if filter_output(text, "").blocked:
+        return HISTORY_WITHHELD
     words = text.split()
     if len(words) > max_words:
         words = words[:max(max_words, 0)] + [TRUNCATION_MARKER]
@@ -70,11 +83,21 @@ def neutralize(text: str, max_words: int) -> str:
 
 def render_block(turns: Sequence[HistoryTurn]) -> str:
     """The history block for build_prompts: the header, then one User and one Assistant line per
-    turn oldest first, then a blank line. No turns gives "", so the prompt is today's."""
-    if not turns:
-        return ""
-    lines = [HISTORY_HEADER]
-    for turn in turns:
-        lines.append("User: " + neutralize(turn.question, HISTORY_QUESTION_MAX_WORDS))
-        lines.append("Assistant: " + neutralize(turn.answer, HISTORY_ANSWER_MAX_WORDS))
-    return "\n".join(lines) + "\n\n"
+    turn oldest first, then a blank line. No turns gives "", so the prompt is today's.
+
+    The oldest turns are dropped until the whole block, header and labels included, is at most
+    HISTORY_BLOCK_MAX_WORDS words; the newest turn is kept while it fits, and "" is returned if not
+    even the newest turn fits. Six maximal turns (60 + 40 words each) exceed 400 words, so this cap,
+    not the per-turn limits, bounds the block. Reporting how many turns were dropped is a Phase 2
+    trace item."""
+    kept = list(turns)
+    while kept:
+        lines = [HISTORY_HEADER]
+        for turn in kept:
+            lines.append("User: " + neutralize(turn.question, HISTORY_QUESTION_MAX_WORDS))
+            lines.append("Assistant: " + neutralize(turn.answer, HISTORY_ANSWER_MAX_WORDS))
+        block = "\n".join(lines) + "\n\n"
+        if len(block.split()) <= HISTORY_BLOCK_MAX_WORDS:
+            return block
+        kept = kept[1:]
+    return ""
