@@ -61,11 +61,11 @@ def build_prompts(
     if style == "spotlight":
         from rag.security.defenses import SPOTLIGHT_ADDENDUM, spotlight_user_prompt
 
-        return base + SPOTLIGHT_ADDENDUM, spotlight_user_prompt(question, context)
+        return base + SPOTLIGHT_ADDENDUM, spotlight_user_prompt(question, context, history_block=history_block)
     if style == "naive":
         from rag.security.defenses import NAIVE_SYSTEM_PROMPT
 
-        return NAIVE_SYSTEM_PROMPT, build_user_prompt(question, context)
+        return NAIVE_SYSTEM_PROMPT, build_user_prompt(question, context, history_block=history_block)
     if style == "standard":
         return base, build_user_prompt(question, context, history_block=history_block)
     raise ValueError(f"unknown prompt style {style!r}")
