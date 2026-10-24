@@ -151,12 +151,13 @@ class RagPipeline:
     def run(self, query_id: str, question: str, config: RetrievalConfig) -> Trace:
         return self.answer(self.retrieval.run(query_id, question, config))
 
-    def answer(self, trace: Trace) -> Trace:
-        """Generate from the context already recorded in a retrieval trace."""
+    def answer(self, trace: Trace, history_block: str = "") -> Trace:
+        """Generate from the context already recorded in a retrieval trace. history_block (earlier
+        turns, already rendered) is passed through unchanged and lands in trace.prompt."""
         question = trace.question
         context = trace.stage("context").hits
         answer, prompt = answer_from_context(self.llm, question, context, style=self.style,
-                                           subject=self.subject)
+                                           subject=self.subject, history_block=history_block)
         trace.answer = answer.text
         blocked: List[str] = []
         if self.output_filter:
