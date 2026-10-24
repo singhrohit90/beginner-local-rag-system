@@ -75,7 +75,7 @@ Open decisions (not settled; do not pick a side outside discuss-phase). Detail i
 
 ### Blockers/Concerns
 
-- [Phase 1]: Server `max_model_len` is not recorded anywhere; reading it needs the PuTTY tunnel to `127.22.10.1:30007` to be up (the user reconnects it if the model-server check says "connection refused").
+- [Phase 2 start]: max_model_len not read on 2026-10-24 (tunnel down, connection refused on 127.22.10.1:30007); `MODEL_CONTEXT_TOKENS` in `rag/query/history.py` uses the 8192 floor; re-read it with the command in `docs/models.md` (Context window) before pinning D3.
 - [Phase 2]: Existing test `test_the_streamed_response_equals_the_ordinary_one` must ignore `conversation_id`; the new conversation subfolder must not change `chat/*.json` trace-count assertions.
 - [Phase 3]: Rewriter behaviour is unmeasured (constraint dropping, parse failures, Ollama context size and silent truncation); the provider module is hook-flagged, so test with a spy instead of reading it.
 - [Phase 4]: Golden-set power is low (one question is 2.7 points; a 12-16 turn set cannot clear an 8-point band); rewriter and judge are both `qwen2.5:7b`, so re-score a borderline result with another judge.
