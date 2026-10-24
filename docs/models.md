@@ -19,6 +19,10 @@ Three kinds of model are used. None of them looks at page images: every model he
 - **Judge (qwen2.5:7b).** Local and free, so a whole evaluation can be rerun at no cost. Its weakness is known and measured: on the about-the-documents questions it marked right answers wrong (1 of 5 correct, against 5 of 6 when the generator graded itself; `docs/about_the_documents.md`). Use a stronger judge that is not the generator before quoting a number.
 - **Hosted Gemini.** Kept as an option; the code needs only a provider class, because `rag/common/llm.py` is the one file that knows how a provider's request looks.
 
+## Context window
+
+`max_model_len` not read on 2026-10-24: tunnel down (connection refused on 127.22.10.1:30007; the probe raised `URLError` with `[WinError 10061] No connection could be made because the target machine actively refused it`). Until it is read, `MODEL_CONTEXT_TOKENS` in `rag/query/history.py` uses 8192 tokens as a floor (decision D-11). The client sends 600 answer tokens plus 3000 thinking tokens as the output limit (3600), so at the floor a prompt may use at most 4592 tokens. Re-read it at the start of Phase 2 with: `python -c "import json,urllib.request; from rag.common.secrets import setting; u=setting('REMOTE_URL','http://127.22.10.1:30007/v1').rstrip('/')+'/models'; k=setting('REMOTE_API_KEY',''); r=urllib.request.Request(u, headers={'Authorization': 'Bearer '+k} if k else {}); d=json.load(urllib.request.urlopen(r, timeout=10)); print([(m['id'], m.get('max_model_len')) for m in d['data']])"`
+
 ## Reasoning model, instruction model, embedding model: the difference
 
 - An **embedding model** does not write text. It maps text to a vector so that similar meanings are close; it is the only thing the vector search uses.
