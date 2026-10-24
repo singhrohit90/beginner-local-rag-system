@@ -79,7 +79,7 @@ Open decisions (not settled; do not pick a side outside discuss-phase). Detail i
 - [Phase 2]: Existing test `test_the_streamed_response_equals_the_ordinary_one` must ignore `conversation_id`; the new conversation subfolder must not change `chat/*.json` trace-count assertions.
 - [Phase 3]: Rewriter behaviour is unmeasured (constraint dropping, parse failures, Ollama context size and silent truncation); the provider module is hook-flagged, so test with a spy instead of reading it.
 - [Phase 4]: Golden-set power is low (one question is 2.7 points; a 12-16 turn set cannot clear an 8-point band); rewriter and judge are both `qwen2.5:7b`, so re-score a borderline result with another judge.
-- Standing constraints: baseline `python -m pytest tests -q` is 591 passed, 2 skipped (593 collected); retrieval invariant hit@5 0.865, mrr 0.663.
+- Standing constraints: pytest baseline after Phase 1 is 702 passed, 2 skipped (704 collected; OpenSearch up on 2026-10-25); before Phase 1 it was 591 passed, 2 skipped (593 collected); retrieval invariant hit@5 0.865, mrr 0.663, unchanged after the Phase 1 seam.
 - Standing constraints: never name `rag/common/llm.py` or `tests/test_vllm.py` in a shell command, never glob `tests/` or `rag/common/`, never read `.env`; commit messages go through `git commit -F <file>`; `SYSTEM_PROMPT` and `DOCUMENT_SYSTEM_PROMPT` stay word for word; `get_llm(..., cache_dir=None)` for every service LLM.
 
 ## Parked
