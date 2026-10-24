@@ -82,6 +82,18 @@ Open decisions (not settled; do not pick a side outside discuss-phase). Detail i
 - Standing constraints: baseline `python -m pytest tests -q` is 591 passed, 2 skipped (593 collected); retrieval invariant hit@5 0.865, mrr 0.663.
 - Standing constraints: never name `rag/common/llm.py` or `tests/test_vllm.py` in a shell command, never glob `tests/` or `rag/common/`, never read `.env`; commit messages go through `git commit -F <file>`; `SYSTEM_PROMPT` and `DOCUMENT_SYSTEM_PROMPT` stay word for word; `get_llm(..., cache_dir=None)` for every service LLM.
 
+## Parked
+
+From the approval brief (gate 1, 2026-10-24); see `.planning/runs/20261021-1840-chat-memory/brief.md`.
+- Review level -- Park until it hurts: local `/code-review high`; raise to ultra when a merged phase shows a bug review should have caught.
+- Rewrite ships OFF this run -- decided: draft golden rows go to the user after the merge (`MULTITURN_REVIEW.md`), then phase 4's scored run is rerun.
+- Compaction -- what: rolling summary at ~70% of the history budget; why later: the hard cap is enough; back when a 409 "conversation full" appears in use.
+- CONV-05..08 -- what: resume on reload, delete one conversation, per-turn citations, show rewritten question; why later: beyond R1-R10; back when phase 5 merges.
+- Cost/tracing then tool calling -- why later: next project; back when this run merges.
+- Keycloak then Docker -- why later: single local user; back when the API is shared.
+- Coding-standards gate -- why later: needs its own session; back when the doc exists.
+- Rest of docs/backlog.md -- why later: unrelated to memory; back after this run.
+
 ## Deferred Items
 
 Items acknowledged and deferred at milestone close, most recent first:

@@ -19,7 +19,7 @@ Requirements for the chat-memory milestone. Each maps to roadmap phases.
 ### Rewrite before retrieval (R3, R4)
 
 - [ ] **RWR-01** (R3): A new `rag/query/rewrite.py` runs in or before `DocumentService._retrieve` (`rag/api/service.py:441`), before `RetrievalPipeline.run`; given the latest message and the last N turns it returns one standalone question that keeps the user's constraints, or the message unchanged when it is already standalone (cheap deterministic check first, model second; no model call on the first turn)
-- [ ] **RWR-02** (R3): Retrieval runs fresh on the rewritten question; the trace records both the original and the rewritten text; any rewrite error surfaces as an HTTP status before any SSE byte is sent (rewrite-failure policy is open decision D2)
+- [ ] **RWR-02** (R3): Retrieval runs fresh on the rewritten question; the trace records both the original and the rewritten text; a rewrite failure falls back to the original message (fail-open) and is visible as `rewrite.status="fallback"` in the trace; errors outside the rewrite still surface as an HTTP status before any SSE byte is sent (D2 decided at gate 1, 2026-10-24)
 - [ ] **RWR-03** (R4): When two readings of a follow-up are equally plausible the system returns one clarifying question instead of guessing, through the normal response and SSE contract, and never two clarifications in a row
 - [ ] **RWR-04** (R4): A detected topic switch starts a clean history for the rewrite; the four named failure modes have tests with a deliberately bad fake rewrite: invented details, dropped constraints, wrong pronoun resolution, an earlier topic leaking into a new question
 
