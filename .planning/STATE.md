@@ -111,6 +111,9 @@ From the approval brief (gate 1, 2026-10-24); see `.planning/runs/20261021-1840-
 
 - Draft multi-turn golden rows (data/golden/conversations_draft.jsonl, 8 rows, all `review: pending-human`) -- decided at gate 1: owner reviews after the merge. The owner must confirm or rewrite every row, remove the `review` key once reviewed, add items until the set covers the categories in ROADMAP phase 4 criterion 1, and check baseline misses (a pronoun follow-up that rewrite-off retrieval already answers does not test the rewriter). No code reads the file until then.
 
+- Phase 4 rerun with the tunnel up -- **Park until it hurts / owner**: `python -m rag.experiments.conversation --repeats 3 --answers --name <new>`, then `REMOTE_REASONING_EFFORT=low python -m rag.experiments.conversation --rewriter vllm:/models/gpt-oss-20b --arms off,on --name <new-gptoss>`, then `--results runs/conversation/<new> --compare runs/conversation/<new-gptoss>`; needed before rewrite can ship on.
+- Over-rewriting (regression variant: one unrelated prior turn -> qwen rewrote 16/37 standalone questions, hit@5 changed on 6) -- must be fixed before rewrite ships on; merge-gate item.
+
 ## Deferred Items
 
 Items acknowledged and deferred at milestone close, most recent first:

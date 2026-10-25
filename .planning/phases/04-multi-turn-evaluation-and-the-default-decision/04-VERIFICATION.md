@@ -1,7 +1,7 @@
 ---
 phase: 04-multi-turn-evaluation-and-the-default-decision
 verified: 2026-10-25T19:01:00Z
-status: human_needed
+status: passed
 score: 13/15 must-haves verified
 covered_files:
   - .planning/phases/04-multi-turn-evaluation-and-the-default-decision/04-01-PLAN.md
@@ -209,3 +209,11 @@ No code gaps. Every artifact exists, has real content and is wired, and the phas
 
 _Verified: 2026-10-25T19:01:00Z_
 _Verifier: Claude (gsd-verifier)_
+
+## Lead resolution of the human items (2026-10-26)
+
+Status set from `human_needed` to `passed` by the flow lead; 13/15 verified, no code gaps.
+
+1. Owner review of the 34 golden rows: DECIDED at gate 1 (2026-10-24): this run ends with rewrite OFF and the owner reviews the rows after the merge. Rule condition (f) keeps the default off until then. Parked in STATE.md.
+2. Question slot and gpt-oss comparison with the tunnel up: DEFERRED by the owner (tunnel down; same decision as phases 1-2). Parked in STATE.md with the exact commands above.
+3. Judgment-tier prohibitions: the verifier found the first five held. The last two (no fixed sleep during live runs, 04-08 and 04-10) CHECKED by the lead: `git diff 3744d3c -- rag tests` adds no `time.sleep`.
