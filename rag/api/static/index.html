@@ -102,6 +102,7 @@
           <option value="dense">dense only</option>
           <option value="bm25">keyword only</option>
         </select>
+        <button type="button" id="newconv" title="Start a new conversation">New conversation</button>
         <button class="primary" type="submit" id="send" disabled>Ask</button>
       </div>
     </form>
@@ -118,6 +119,9 @@
 const $ = (id) => document.getElementById(id);
 let docs = [], selected = null, answers = {}, poll = null, ready = false;
 const checked = new Set();
+let conversationId = null, epoch = 0, inflight = null;  // the id the server gave this conversation; how many times the page started over; the running ask's AbortController
+const CONV_GONE = "no such conversation";  // the server's one 404 body for every unusable conversation id
+const DETAIL_HINT = $("detail").textContent;
 
 function el(tag, props = {}, ...kids) {
   const node = document.createElement(tag);
@@ -150,6 +154,24 @@ function longText(text, limit = 240) {
 }
 
 function showError(message) { $("error").replaceChildren(message ? longText(message) : ""); }
+
+// Start over: the next question carries no id; a running ask is cancelled and its late result is ignored.
+function resetConversation() {
+  epoch++;
+  conversationId = null;
+  if (inflight) { inflight.abort(); inflight = null; }
+  $("log").replaceChildren();
+  $("detail").replaceChildren(DETAIL_HINT);
+  showError("");
+  updateChat();
+}
+
+// The content route; the conversation id goes only to it.
+function askContent(question, ids, signal, onText, onNote) {
+  const body = { question, doc_ids: ids, config: $("config").value };
+  if (conversationId) body.conversation_id = conversationId;
+  return streamAsk("/v1/ask/stream", body, onText, signal);
+}
 
 async function refresh() {
   docs = await api("/v1/documents");
@@ -208,6 +230,7 @@ function updateChat() {
 }
 $("scope").onchange = updateChat;
 $("mode").onchange = updateChat;
+$("newconv").onclick = () => resetConversation();
 $("question").onkeydown = (e) => {  // Enter sends, Shift+Enter makes a new line
   if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); if (!$("send").disabled) $("ask").requestSubmit(); }
 };
@@ -226,8 +249,8 @@ $("upload").onsubmit = async (e) => {
 
 // Asks a question and reads the answer as server-sent events: "token" events carry text that has passed the
 // server's stream guard, "final" carries the checked answer and everything else, "error" a failure part-way.
-async function streamAsk(path, body, onText) {
-  const res = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+async function streamAsk(path, body, onText, signal) {
+  const res = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body), signal });
   if (!res.ok) {  // a problem found before streaming starts is an ordinary HTTP error
     let detail = res.statusText;
     try { detail = (await res.json()).detail || detail; } catch (_) {}
@@ -257,6 +280,7 @@ $("ask").onsubmit = async (e) => {
   e.preventDefault(); showError("");
   const question = $("question").value.trim(); const ids = targets(); if (!question || (ids !== null && !ids.length)) return;
   $("question").value = ""; $("send").disabled = true;
+  const mine = epoch, ctl = new AbortController(); inflight = ctl;
   const asked = el("div", { class: "msg q" }, question, el("br"), el("small", { class: "meta" }, "asked of: " + scopeLabel()));
   $("log").append(asked);
   try {
@@ -268,11 +292,13 @@ $("ask").onsubmit = async (e) => {
     let r;
     try {
       if (about) {
-        r = await api("/v1/ask-about", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ question, doc_ids: ids }) });
+        r = await api("/v1/ask-about", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ question, doc_ids: ids }), signal: ctl.signal });
       } else {
-        r = await streamAsk("/v1/ask/stream", { question, doc_ids: ids, config: $("config").value }, (text) => { shown.data += text; msg.scrollIntoView({ block: "nearest" }); });
+        r = await askContent(question, ids, ctl.signal, (text) => { shown.data += text; msg.scrollIntoView({ block: "nearest" }); },
+                             (note) => msg.before(el("div", { class: "meta" }, note)));
       }
     } catch (err) {
+      if (mine !== epoch) return;  // a superseded ask leaves the cleared log alone
       // One bubble for the question's failure: the partial text (if any), a tag, and the reason, with the
       // reason folded behind "more" when it is long.
       showError(err.message);
@@ -281,7 +307,9 @@ $("ask").onsubmit = async (e) => {
       msg.scrollIntoView(); checkStatus();
       r = null;
     }
+    if (mine !== epoch) return;
     if (r) {
+      if (!about && r.conversation_id) conversationId = r.conversation_id;
       answers[r.query_id] = r;
       // the checked answer replaces what was streamed (they are the same unless the final check failed)
       msg.replaceChildren(r.answer || "");
@@ -292,9 +320,11 @@ $("ask").onsubmit = async (e) => {
       msg.click(); msg.scrollIntoView();
     }
   } catch (err) {
-    showError(err.message);  // a problem while drawing the answer; the question stays in the log
+    if (mine === epoch) showError(err.message);  // a problem while drawing the answer; the question stays in the log
+  } finally {
+    if (inflight === ctl) inflight = null;
+    if (mine === epoch) { $("send").disabled = false; $("question").focus(); }  // a reset already re-enabled Ask
   }
-  $("send").disabled = false; $("question").focus();
 };
 
 // What an "about the documents" answer was based on: each document's profile as the model saw it.
