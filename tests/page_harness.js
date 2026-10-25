@@ -198,6 +198,71 @@ const SCENARIOS = {
     await ask(page, "and what about its drawbacks?");
     return observe(page);
   },
+
+  async new_conversation(page) {
+    page.state.replies.push({ final: finalEvent(A_ID) }, { final: finalEvent(B_ID) });
+    await ask(page, "How does replication survive a node failure?");
+    const afterAsk = idOf(page);
+    page.$("newconv").click();
+    const afterReset = { id: idOf(page), logText: textOf(page.$("log")), detailText: textOf(page.$("detail")) };
+    await ask(page, "What is compaction?");
+    return Object.assign(observe(page), { afterAsk, afterReset });
+  },
+
+  async target_change(page) {
+    const steps = {};
+    const record = (name) => { steps[name] = { id: idOf(page), logEmpty: page.$("log").children.length === 0 }; };
+    const docNode = (name) => page.$("docs").children.find((n) => n.nodeType !== 3 && textOf(n).includes(name));
+    const checkbox = (name) => docNode(name).children.find((n) => n.tagName === "INPUT");
+    const deleteButton = (name) => {
+      const find = (n) => n.nodeType === 3 ? null : n.tagName === "BUTTON" && textOf(n) === "Delete" ? n : n.children.map(find).find(Boolean) || null;
+      return find(docNode(name));
+    };
+    // refresh() rebuilds every row, so a new first row means the list was drawn again
+    const refreshed = async (label, before) => waitFor(() => page.$("docs").children[0] !== before, label);
+    const select = async (id, label) => {
+      const before = page.$("docs").children[0];
+      vm.runInContext(`select(${JSON.stringify(id)})`, page.ctx);
+      await refreshed(label, before);
+    };
+    const setScope = (value) => { page.$("scope").value = value; page.$("scope").onchange(); };
+    const tick = (name) => { const box = checkbox(name); box.checked = !box.checked; box.onclick({ stopPropagation() {} }); };
+
+    page.state.replies.push({ final: finalEvent(A_ID) });
+    await ask(page, "q under all"); record("asked_all");
+    await select("d2", "b.pdf selected"); record("highlight_all");
+    setScope("one"); record("scope_change");
+    page.state.replies.push({ final: finalEvent(B_ID) });
+    await ask(page, "q under one"); record("asked_one");
+    await select("d2", "b.pdf selected again"); record("same_doc_one");
+    await select("d1", "a.pdf selected"); record("other_doc_one");
+    setScope("checked");
+    tick("a.pdf");
+    page.state.replies.push({ final: finalEvent(C_ID) });
+    await ask(page, "q under checked"); record("asked_checked");
+    tick("b.pdf"); record("checkbox_checked");
+    setScope("all");
+    page.state.replies.push({ final: finalEvent(D_ID) });
+    await ask(page, "q before delete"); record("asked_before_delete");
+    await deleteButton("b.pdf").onclick({ stopPropagation() {} });
+    await waitFor(() => !textOf(page.$("docs")).includes("b.pdf"), "b.pdf gone");
+    record("deleted_target");
+    return Object.assign(observe(page), { steps });
+  },
+
+  async stale_404(page, strings) {
+    vm.runInContext(`conversationId = ${JSON.stringify(A_ID)}`, page.ctx);
+    page.state.replies.push({ status: 404, json: { detail: strings.gone } }, { final: finalEvent(B_ID) });
+    await ask(page, "and what about its drawbacks?");
+    return observe(page);
+  },
+
+  async other_404(page) {
+    vm.runInContext(`conversationId = ${JSON.stringify(A_ID)}`, page.ctx);
+    page.state.replies.push({ status: 404, json: { detail: "no such document" } });
+    await ask(page, "and what about its drawbacks?");
+    return observe(page);
+  },
 };
 
 async function main() {
