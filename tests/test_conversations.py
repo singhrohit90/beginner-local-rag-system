@@ -19,10 +19,12 @@ from rag.api.main import create_app, current_owner
 from rag.api.service import DocumentService
 from rag.common.embed import HashingEmbedder
 from rag.common.llm import FakeLLM, LLMResult, StreamPiece
+from rag.common.types import Hit
 from rag.common.trace import load_trace
 from rag.query.generate import build_prompts
 from rag.query.guard import BLOCKED
-from rag.query.history import HISTORY_HEADER, HISTORY_WINDOW_TURNS, render_block, window
+from rag.query.history import (HISTORY_HEADER, HISTORY_WINDOW_TURNS, HistoryTurn, estimate_prompt_tokens,
+                               fits_context, render_block, window)
 from tests.test_api import COMPACTION, REPLICATION, make_pdf
 from tests.test_stream_api import frames
 
@@ -445,3 +447,78 @@ def test_an_unstarted_stream_frees_the_conversation_when_dropped(tmp_path):
     del events  # never started, so its finally never runs; the finalizer must free the conversation
     gc.collect()
     assert service.ask_documents("local", [doc_id], "q3", conversation_id=cid)["turn"] == 2
+
+
+FULL = {"detail": "this conversation is full; start a new conversation"}
+
+
+def test_a_full_conversation_is_refused_before_any_model_call_or_sse_byte(tmp_path):
+    llm, seen = recording()
+    service = make_service(tmp_path, llm=llm)
+    doc_id = add_document(service, REPLICATION)
+    client = client_for(service)
+    service.conversations.max_turns = 2
+    ask = f"/v1/documents/{doc_id}/ask"
+    first = client.post(ask, json={"question": "q1"})
+    assert first.status_code == 200
+    cid = first.json()["conversation_id"]
+    assert client.post(ask, json={"question": "q2", "conversation_id": cid}).status_code == 200  # one stored: room
+    calls = len(seen)
+    full = client.post(ask, json={"question": "q3", "conversation_id": cid})  # two stored: full
+    assert full.status_code == 409 and full.json() == FULL
+    streamed = client.post(ask + "/stream", json={"question": "q3", "conversation_id": cid})
+    assert streamed.status_code == 409 and streamed.json() == FULL
+    assert not streamed.headers["content-type"].startswith("text/event-stream")
+    assert len(seen) == calls  # refused before any model call
+    fresh = client.post(ask, json={"question": "q4"})
+    assert fresh.status_code == 200 and fresh.json()["turn"] == 1
+
+
+def test_the_stored_word_cap_refuses_the_next_turn(tmp_path):
+    service = make_service(tmp_path)
+    doc_id = add_document(service, REPLICATION)
+    client = client_for(service)
+    service.conversations.max_words = 50
+    under = seed_turns(service, "local", [doc_id], [doc_id], [(" ".join(["q"] * 24), " ".join(["a"] * 25))])  # 49
+    at_cap = seed_turns(service, "local", [doc_id], [doc_id], [(" ".join(["q"] * 25), " ".join(["a"] * 25))])  # 50
+    ask = f"/v1/documents/{doc_id}/ask"
+    assert client.post(ask, json={"question": "next", "conversation_id": under}).status_code == 200
+    refused = client.post(ask, json={"question": "next", "conversation_id": at_cap})
+    assert refused.status_code == 409 and refused.json() == FULL
+
+
+def test_an_oversized_follow_up_is_refused_but_a_first_turn_is_not(tmp_path, monkeypatch):
+    llm, seen = recording()
+    service = make_service(tmp_path, llm=llm)
+    doc_id = add_document(service, REPLICATION)
+    client = client_for(service)
+    monkeypatch.setattr("rag.query.history.MODEL_CONTEXT_TOKENS", 3700)  # below any real prompt plus 3600
+    ask = f"/v1/documents/{doc_id}/ask"
+    first = client.post(ask, json={"question": "How does replication survive a node failure?"})
+    assert first.status_code == 200  # a first turn is never budget-checked, exactly as today
+    cid = first.json()["conversation_id"]
+    calls = len(seen)
+    follow_up = {"question": "And how many copies does it keep?", "conversation_id": cid}
+    refused = client.post(ask, json=follow_up)
+    assert refused.status_code == 409 and refused.json() == FULL
+    streamed = client.post(ask + "/stream", json=follow_up)
+    assert streamed.status_code == 409 and streamed.json() == FULL
+    assert not streamed.headers["content-type"].startswith("text/event-stream")
+    assert len(seen) == calls
+
+
+def test_worst_case_prompt_plus_3600_fits_the_recorded_context_window(monkeypatch):
+    turns = [HistoryTurn(" ".join([f"q{i}"] * 80), " ".join([f"a{i}"] * 80), "2026-10-22T09:30:00+00:00")
+             for i in range(7)]
+    block = render_block(window(turns, HISTORY_WINDOW_TURNS))
+    hits = [Hit(f"w{i}", i, 1.0, 100 + i, 100 + i, " ".join(["data"] * 300)) for i in range(1, 6)]  # 1500 words
+    question = ("data " * 400).strip()
+    assert len(question) == 1999  # the API limit is 2000
+    for style in ("standard", "spotlight"):
+        system, user = build_prompts(question, hits, style, "document", history_block=block)
+        assert block in user
+        assert fits_context(system, user), (style, estimate_prompt_tokens(system, user))
+    monkeypatch.setattr("rag.query.history.MODEL_CONTEXT_TOKENS", 8192)  # the floor
+    pathological = ("a " * 1000).strip()  # 1999 characters of one-letter words
+    assert len(pathological) == 1999
+    assert not fits_context(*build_prompts(pathological, hits, "spotlight", "document", history_block=block))
