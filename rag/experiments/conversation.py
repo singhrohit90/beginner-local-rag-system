@@ -66,11 +66,13 @@ The results end with exactly one line that starts `Decision: ships on` or `Decis
 """
 
 import argparse
+import copy
 import json
 import logging
 import re
 import subprocess
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from math import ceil, comb
 from pathlib import Path
@@ -83,12 +85,14 @@ from rag.common.secrets import setting
 from rag.common.trace import Trace
 from rag.ingestion.chunking.base import load_chunkset
 from rag.ingestion.index import get_index
+from rag.observe.generation_quality.judge import judge_facts
 from rag.observe.golden import GoldQuestion, load_golden
 from rag.observe.golden_conversations import CATEGORIES, GoldConversation, load_conversations
 from rag.observe.retrieval_quality.metrics import score_hits, strict_trace
 from rag.query.configs import CONFIGS, RetrievalConfig
-from rag.query.history import HISTORY_ANSWER_MAX_WORDS, HistoryTurn, window
-from rag.query.pipeline import RetrievalPipeline
+from rag.query.generate import looks_like_abstention
+from rag.query.history import HISTORY_ANSWER_MAX_WORDS, HistoryTurn, render_block, window
+from rag.query.pipeline import RagPipeline, RetrievalPipeline
 from rag.query.rewrite import RewriteResult, needs_rewrite, rewrite_question
 
 logger = logging.getLogger("rag.experiments.conversation")
@@ -447,6 +451,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--check-rule", action="store_true",
                         help="report whether the shipping rule is committed, clean and unchanged")
     parser.add_argument("--name", default=None, help="run folder under runs/conversation/ (default: UTC time)")
+    parser.add_argument("--repeats", type=int, default=1,
+                        help="repeat the on arm; the rule uses repeat 1, later repeats are instability only")
+    parser.add_argument("--answers", action="store_true",
+                        help="also answer the last turn (generator) and score it with the fact checklist (judge)")
+    parser.add_argument("--llm", default=setting("RAG_LLM", "vllm:/models/gpt-oss-20b"), help="generator spec")
+    parser.add_argument("--judge", default=setting("RAG_JUDGE", "ollama:qwen2.5:7b"), help="fact-checklist judge spec")
+    parser.add_argument("--workers", type=int, default=4, help="items answered in parallel")
     return parser
 
 
@@ -699,6 +710,103 @@ def decision_line(rule: Dict[str, Any], pending: int) -> str:
     return f"Decision: ships off ({why})"
 
 
+def instability(repeat_rows: Sequence[Sequence[Dict[str, Any]]]) -> Dict[str, Any]:
+    """Per repeat: on hit@5 mean, status counts and the ids whose on hit@5 differs from repeat 1. Reported only."""
+    def on_hits(rows: Sequence[Dict[str, Any]]) -> Dict[str, float]:
+        return {r["id"]: r["arms"]["on"]["hit@5"] for r in _answer_rows(rows) if r["arms"].get("on") is not None}
+
+    first = on_hits(repeat_rows[0]) if repeat_rows else {}
+    per_repeat: List[Dict[str, Any]] = []
+    unstable: List[str] = []
+    for rows in repeat_rows:
+        hits = on_hits(rows)
+        changed = [i for i in first if i in hits and hits[i] != first[i]]
+        unstable += [i for i in changed if i not in unstable]
+        per_repeat.append({"on_hit@5": _mean(list(hits.values())), "statuses": status_counts(rows)["statuses"],
+                           "changed": changed})
+    return {"per_repeat": per_repeat, "unstable_ids": unstable}
+
+
+def _answer_item(
+    rag: RagPipeline, judge: Any, item: GoldConversation, row: Dict[str, Any],
+    traces: Dict[Tuple[str, str], Trace],
+) -> Dict[str, Any]:
+    win = window(teacher_history(item))
+    block = render_block(win)
+    rewrite = row.get("rewrite") or {}
+    on_block = render_block([]) if rewrite.get("status") == "new_topic" else block
+    on_score = row["arms"].get("on")
+    variants: List[Tuple[str, Optional[Trace], str, str]] = [
+        ("off", traces.get((item.id, "off")), item.message, block),
+        ("oracle", traces.get((item.id, "oracle")), item.standalone or item.message, block),
+    ]
+    if on_score is not None:
+        on_trace = traces.get((item.id, "on"))
+        variants += [("on", on_trace, on_score["query"] or item.message, on_block),
+                     ("on_original", on_trace, item.message, on_block)]
+    result: Dict[str, Any] = {"id": item.id, "category": item.category, "off": None, "on": None,
+                              "on_original": None, "oracle": None}
+    memo: Dict[Tuple[str, Tuple[str, ...], str], str] = {}
+    for name, trace, slot, history in variants:
+        if name in ("on", "on_original") and on_score.get("false_clarify"):
+            result[name] = {"answer": None, "correct": False, "abstained": False, "reused": False}
+            continue
+        if trace is None:
+            continue
+        ids = tuple(h.chunk_id for h in trace.stage("context").hits)
+        key = (slot, ids, history)
+        reused = key in memo
+        if not reused:
+            t = copy.deepcopy(trace)  # answer() writes into the trace; the two slot variants share one retrieval
+            t.question = slot
+            memo[key] = rag.answer(t, history_block=history).answer
+        answer = memo[key]
+        abstained = looks_like_abstention(answer)
+        if abstained:
+            correct: Optional[bool] = False
+        elif judge is None:
+            correct = None
+        else:
+            correct = judge_facts(judge, answer, list(item.key_facts)).correct
+        result[name] = {"answer": answer, "correct": correct, "abstained": abstained, "reused": reused}
+    return result
+
+
+def run_answers(
+    rag: RagPipeline, judge: Any, items: Sequence[GoldConversation], rows: Sequence[Dict[str, Any]],
+    traces: Dict[Tuple[str, str], Trace], workers: int = 1,
+) -> List[Dict[str, Any]]:
+    """Answer the last turn of each answer item for off, oracle, on and on_original, scored by the fact
+    checklist only (an abstention is wrong). Rows come back in item order."""
+    by_id = {r["id"]: r for r in rows}
+    todo = [item for item in items if item.expect == "answer" and item.id in by_id]
+    if workers > 1:
+        with ThreadPoolExecutor(workers) as pool:
+            return list(pool.map(lambda item: _answer_item(rag, judge, item, by_id[item.id], traces), todo))
+    return [_answer_item(rag, judge, item, by_id[item.id], traces) for item in todo]
+
+
+def answers_summary(answer_rows: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
+    summary: Dict[str, Any] = {}
+    for variant in ANSWER_ARMS:
+        scored = [r[variant] for r in answer_rows if r.get(variant) is not None]
+        judged = [s for s in scored if s["correct"] is not None]
+        correct = sum(1 for s in judged if s["correct"])
+        summary[variant] = {"correct": correct, "judged": len(judged), "rate": _rate(correct, len(judged))}
+    return summary
+
+
+def slot_decision(summary: Optional[Dict[str, Any]], band: float) -> str:
+    """D-11: keep the rewritten question unless the original-message slot is better by more than the band."""
+    if summary is None:
+        return "unmeasured"
+    on_rate = (summary.get("on") or {}).get("rate")
+    original_rate = (summary.get("on_original") or {}).get("rate")
+    if on_rate is not None and original_rate is not None and 100.0 * (original_rate - on_rate) > band:
+        return "original message"
+    return "rewritten question"
+
+
 def _fmt(value: Any, digits: int = 3) -> str:
     if value is None:
         return "n/a"
@@ -859,6 +967,15 @@ def print_tables(report: Dict[str, Any]) -> None:
     print(f"gate precision {_fmt(gate['precision'])} recall {_fmt(gate['recall'])}; latency p50 "
           f"{_fmt(lat['p50'], 1)} ms p95 {_fmt(lat['p95'], 1)} ms over {lat['count']}")
     print("regression: " + _regression_line(summary))
+    for i, rep in enumerate((report.get("repeats") or {}).get("per_repeat", [])[1:], start=2):
+        changed = ", ".join(rep["changed"]) or "none"
+        print(f"repeat {i}: on hit@5 {_fmt(rep['on_hit@5'])}, changed vs repeat 1: {changed}")
+    answers = report.get("answers_summary")
+    if answers:
+        print("answers (fact checklist): " + ", ".join(
+            f"{v} {a['correct']}/{a['judged']}" for v, a in answers.items()) + f"; slot: {report.get('slot')}")
+    else:
+        print("answers: unmeasured")
     for check in rule.get("checks", []):
         print(f"({check['label']}) {'passed' if check['passed'] else 'failed'}: {check['detail']}")
     print(decision_line(rule, summary["pending"]))
@@ -951,8 +1068,14 @@ def main() -> None:
             print(f"arm skipped: model unreachable: on (rewriter {args.rewriter}: {reason})")
         else:
             rewriter = CallCounter(raw)
-    rows, _ = run_arms(pipeline, config, items, arms, rewriter)
-    report: Dict[str, Any] = {"meta": meta, "arms_not_run": arms_not_run, "rows": rows}
+    rows, traces = run_arms(pipeline, config, items, arms, rewriter)
+    repeat_rows = [rows]
+    if rewriter is not None:
+        for _ in range(2, max(1, args.repeats) + 1):  # repeats re-draw only the on arm; the others are deterministic
+            again, _ = run_arms(pipeline, config, items, ["on"], rewriter)
+            repeat_rows.append(again)
+    report: Dict[str, Any] = {"meta": meta, "arms_not_run": arms_not_run, "rows": rows,
+                              "repeats": instability(repeat_rows)}
     if raw is not None:
         questions = load_golden(SINGLE_TURN_GOLDEN)
         report["regression"] = run_regression(pipeline, config, questions, raw)  # empty window: no call
@@ -962,6 +1085,28 @@ def main() -> None:
         report["regression"] = {"skipped": "the on arm was not requested"}
         report["regression_unrelated"] = {"skipped": "the on arm was not requested"}
     _decide(report, arms)
+    report["slot"] = "unmeasured"
+    if args.answers and rewriter is None:
+        report["answers_not_run"] = {"answers": "the on arm did not run"}
+        print("arm skipped: answers (the on arm did not run)")
+    elif args.answers:
+        generator = get_llm(args.llm, cache_dir=None)
+        judge = get_llm(args.judge, cache_dir=None)
+        not_run: Dict[str, str] = {}
+        for role, spec, llm in (("generator", args.llm, generator), ("judge", args.judge, judge)):
+            failed = preflight(llm)
+            if failed is not None:
+                not_run[role] = f"{spec} unreachable ({failed})"
+                print(f"arm skipped: model unreachable: answers ({role} {spec}: {failed})")
+        if not_run:
+            report["answers_not_run"] = not_run
+        else:
+            rag = RagPipeline(pipeline, generator, style="standard", subject="book")
+            report["answers"] = run_answers(rag, judge, items, rows, traces, workers=args.workers)
+            report["answers_summary"] = answers_summary(report["answers"])
+            report["slot"] = slot_decision(report["answers_summary"], report["summary"]["band"])
+            report["judge_same_as_rewriter"] = args.judge == args.rewriter
+            report["judge_spec"] = args.judge
     write_report(report, out_dir)
     (out_dir / "results.md").write_text(render_results(report), encoding="utf-8")
     print_tables(report)
