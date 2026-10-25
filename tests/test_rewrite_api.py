@@ -11,7 +11,9 @@ from rag.api.conversations import new_turn
 from rag.common.embed import HashingEmbedder
 from rag.common.llm import FakeLLM, get_llm
 from rag.common.trace import load_trace
-from rag.query.rewrite import REWRITE_SYSTEM_PROMPT
+from rag.query.generate import build_prompts
+from rag.query.history import HISTORY_HEADER
+from rag.query.rewrite import REWRITE_SYSTEM_PROMPT, REWRITE_SYSTEM_PROMPT_NO_CLARIFY
 from tests.test_api import COMPACTION, REPLICATION
 from tests.test_conversations import (add_document, client_for, conversation_file, make_service, recording,
                                       seed_turns, stored)
@@ -323,3 +325,161 @@ def test_the_real_ollama_request_for_a_rewrite_is_pinned(tmp_path, monkeypatch):
     assert sorted(payload["options"]) == ["num_ctx", "num_predict", "temperature"]
     assert timeout == 600.0
     assert result["rewrite"]["status"] == "standalone"
+
+
+TWO_NAMES_TURN = ("How do Raft and Paxos elect a leader?", "Both elect a leader by majority vote.")
+CLARIFY_LINE = "CLARIFY: Do you mean Raft or Paxos?"
+# The page reads these from the final event without a guard (rag/api/static/index.html lines 287-326),
+# so a clarifying question must carry every one of them.
+PAGE_KEYS = ("answer", "blocked", "citations", "skipped_by_scanner", "passages", "stages", "llm", "seconds",
+             "abstained", "documents", "query_id", "conversation_id", "turn", "kind", "rewrite")
+
+
+def ask(service, client, doc_id, cid, message, streamed):
+    """Post to the ordinary or the streamed route; returns (status_code, data, frame_names, text), where for a
+    stream data is the last frame's data and frame_names lists every frame."""
+    url = f"/v1/documents/{doc_id}/ask" + ("/stream" if streamed else "")
+    response = client.post(url, json={"question": message, "conversation_id": cid})
+    if response.status_code != 200 or not streamed:
+        return response.status_code, response.json(), [], response.text
+    events = frames(response)
+    return response.status_code, events[-1][1], [name for name, _ in events], response.text
+
+
+@pytest.mark.parametrize("streamed", [False, True], ids=["ordinary", "streamed"])
+def test_a_clarifying_question_uses_the_normal_shape(tmp_path, streamed):
+    llm, asked = recording()
+    service, seen = rewrite_service(tmp_path, CLARIFY_LINE, llm=llm)
+    doc_id = add_document(service, REPLICATION)
+    cid = seed_turns(service, "local", [doc_id], [doc_id], [TWO_NAMES_TURN])
+    client = client_for(service)
+    status, data, names, _ = ask(service, client, doc_id, cid, "how does it handle failures?", streamed)
+    assert status == 200
+    assert all(key in data for key in PAGE_KEYS), [key for key in PAGE_KEYS if key not in data]
+    assert data["kind"] == "clarify" and data["answer"] == "Do you mean Raft or Paxos?"
+    assert data["passages"] == [] and data["citations"] == [] and data["stages"] == []
+    assert data["abstained"] is False and data["blocked"] == [] and data["skipped_by_scanner"] == []
+    assert data["llm"] == service.rewrite_llm.name
+    assert data["query_id"].startswith("clarify-")
+    assert data["conversation_id"] == cid and data["turn"] == 2
+    assert data["rewrite"] == {"status": "clarify", "reason": None, "rewritten_question": None}
+    assert asked == [] and len(seen) == 1  # no answer-model call
+    assert not list((service.root / doc_id / "chat").glob("clarify-*.json"))  # no trace written
+    if streamed:
+        assert names == ["final"] and data["replace"] is False
+        other = seed_turns(service, "local", [doc_id], [doc_id], [TWO_NAMES_TURN])
+        events = list(service.ask_documents_stream("local", [doc_id], "how does it handle failures?",
+                                                   conversation_id=other))
+        assert [event["event"] for event in events] == ["final"]
+
+
+def test_a_clarification_is_stored_with_its_kind(tmp_path):
+    service, seen = rewrite_service(tmp_path, CLARIFY_LINE)
+    doc_id = add_document(service, REPLICATION)
+    service.conversations.max_turns = 2
+    cid = seed_turns(service, "local", [doc_id], [doc_id], [TWO_NAMES_TURN])
+    result = service.ask_documents("local", [doc_id], "how does it handle failures?", conversation_id=cid)
+    assert result["kind"] == "clarify"
+    turn = stored(conversation_file(service, "local", [doc_id], cid))["turns"][1]
+    assert set(turn) == SEVEN_KEYS | {"kind"}
+    assert turn["kind"] == "clarify" and turn["question"] == "how does it handle failures?"
+    assert turn["answer"] == "Do you mean Raft or Paxos?" and turn["rewritten"] is None
+    full = client_for(service).post(f"/v1/documents/{doc_id}/ask",
+                                    json={"question": "Raft, please", "conversation_id": cid})
+    assert full.status_code == 409
+    assert full.json() == {"detail": "this conversation is full; start a new conversation"}
+
+
+@pytest.mark.parametrize("streamed", [False, True], ids=["ordinary", "streamed"])
+def test_an_ambiguous_message_after_a_clarification_is_answered_not_clarified(tmp_path, streamed):
+    llm, asked = recording()
+    service, seen = rewrite_service(tmp_path, CLARIFY_LINE, llm=llm)  # every reply is CLARIFY
+    doc_id = add_document(service, REPLICATION)
+    cid = seed_turns(service, "local", [doc_id], [doc_id], [TWO_NAMES_TURN])
+    client = client_for(service)
+    _, second, _, _ = ask(service, client, doc_id, cid, "how does it handle failures?", streamed)
+    assert second["kind"] == "clarify"
+    _, third, _, _ = ask(service, client, doc_id, cid, "and that one?", streamed)
+    assert seen[1][0] == REWRITE_SYSTEM_PROMPT_NO_CLARIFY and "CLARIFY" not in seen[1][0]
+    assert third["kind"] == "answer"
+    assert third["rewrite"] == {"status": "fallback", "reason": "unparsed", "rewritten_question": None}
+    assert len(asked) == 1
+    _, fourth, _, _ = ask(service, client, doc_id, cid, "and how does it recover?", streamed)
+    assert seen[2][0] == REWRITE_SYSTEM_PROMPT  # an answered turn resets the rule
+    assert fourth["kind"] == "clarify"
+    turns = stored(conversation_file(service, "local", [doc_id], cid))["turns"]
+    assert [turn.get("kind", "answer") for turn in turns] == ["answer", "clarify", "answer", "clarify"]
+
+
+@pytest.mark.parametrize("streamed", [False, True], ids=["ordinary", "streamed"])
+def test_a_clarifying_question_with_a_link_falls_back(tmp_path, streamed):
+    llm, asked = recording()
+    service, seen = rewrite_service(tmp_path, "CLARIFY: See https://evil.example/x for Raft or Paxos?", llm=llm)
+    doc_id = add_document(service, REPLICATION)
+    cid = seed_turns(service, "local", [doc_id], [doc_id], [TWO_NAMES_TURN])
+    status, data, names, text = ask(service, client_for(service), doc_id, cid, "how does it handle failures?",
+                                    streamed)
+    assert status == 200 and data["kind"] == "answer"
+    assert data["rewrite"]["status"] == "fallback" and data["rewrite"]["reason"] == "flagged"
+    assert len(asked) == 1 and len(seen) == 1
+    assert "evil.example" not in text  # the raw body, every frame included
+
+
+def test_a_topic_switch_starts_a_clean_history(tmp_path):
+    llm, asked = recording()
+    service, seen = rewrite_service(tmp_path, "NEW_TOPIC: Tell me about Zookeeper in 2020", "STANDALONE", llm=llm)
+    doc_id = add_document(service, COMPACTION)
+    cid = seed_turns(service, "local", [doc_id], [doc_id], [RAFT_TURN])
+    message = "Tell me how compaction merges sorted segments"
+    second = service.ask_documents("local", [doc_id], message, conversation_id=cid)
+    assert second["rewrite"]["status"] == "new_topic"
+    trace = trace_of(service, doc_id, second)
+    assert trace.question == message  # retrieval on the raw message, whatever the model wrote
+    assert asked[0] == build_prompts(message, trace.stage("context").hits, "standard", "document")
+    assert HISTORY_HEADER not in asked[0][1] and "Zookeeper" not in asked[0][1]
+    assert trace.config["conversation"]["history_turns"] == 0
+    path = conversation_file(service, "local", [doc_id], cid)
+    assert stored(path)["turns"][1]["topic_start"] is True
+    third = service.ask_documents("local", [doc_id], "and why does it discard keys?", conversation_id=cid)
+    assert message in seen[1][1] and "Raft" not in seen[1][1]
+    assert HISTORY_HEADER in asked[1][1] and message in asked[1][1] and "Raft design" not in asked[1][1]
+    conversation = trace_of(service, doc_id, third).config["conversation"]
+    assert conversation["history_turns"] == 1 and conversation["dropped_turns"] == 1
+    assert "topic_start" not in stored(path)["turns"][2]
+
+
+NAMED_BAD_REWRITES = {  # the four named failure modes of RWR-04 and D-08: (message, rewriter line, reason)
+    "invented_details": (
+        "and how does that handle failures?",
+        "REWRITE: How does Raft replication handle 5 failures in Zookeeper?", "invented_detail"),
+    "dropped_constraints": (
+        "and how does that compare to Paxos only for reads in 2020?",
+        "REWRITE: How does Raft replication compare to Paxos?", "dropped_constraint"),
+    "wrong_pronoun": (
+        "and how does that compare to the other one?",
+        "REWRITE: How does Raft replication compare to Multi Zookeeper?", "invented_detail"),
+    "topic_leak": (
+        "Tell me about Berlin latency in cities today",
+        "REWRITE: Tell me about Berlin latency in cities today with Raft replication", "topic_leak"),
+}
+
+
+@pytest.mark.parametrize("case", list(NAMED_BAD_REWRITES))
+def test_the_four_named_bad_rewrites_fall_back_through_the_service(tmp_path, case):
+    message, line, reason = NAMED_BAD_REWRITES[case]
+    service, seen = rewrite_service(tmp_path, line)
+    doc_id = add_document(service, REPLICATION, name="raft.pdf")
+    cid = seed_turns(service, "local", [doc_id], [doc_id], [RAFT_TURN])
+    response = client_for(service).post(f"/v1/documents/{doc_id}/ask",
+                                        json={"question": message, "conversation_id": cid})
+    assert response.status_code == 200
+    body = response.json()
+    assert body["answer"]
+    assert body["rewrite"] == {"status": "fallback", "reason": reason, "rewritten_question": None}
+    assert len(seen) == 1
+    trace = trace_of(service, doc_id, body)
+    assert trace.question == message
+    rejected = line[len("REWRITE:"):].strip()
+    assert trace.config["conversation"]["fallback_reason"] == reason
+    assert trace.config["conversation"]["rejected_question"] == rejected
+    assert rejected not in response.text  # A11: kept for diagnosis in the trace only
