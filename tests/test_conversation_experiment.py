@@ -364,3 +364,181 @@ def test_repeats_report_instability_without_gating():
     report = instability([first, second])
     assert report["per_repeat"][1]["changed"] == ["p1"] and report["unstable_ids"] == ["p1"]
     assert build_report(first, regression)["rule"] == before  # the rule reads repeat 1 only
+
+
+def rule_args(**overrides: Any) -> Dict[str, Any]:
+    args: Dict[str, Any] = {"n": 30, "wins": 5, "losses": 0, "standalone_losses": 0, "regression_identical": True,
+                            "regression_calls": 0, "fallbacks": 0, "gate_calls": 20, "all_approved": True}
+    args.update(overrides)
+    return args
+
+
+# (evaluate_rule arguments, ship_on, failed labels or None when the rule is not evaluated, expected band or None)
+RULE_CASES = [
+    pytest.param(rule_args(wins=3), False, ["a"], 10.0, id="n30_net3_fails_a"),
+    pytest.param(rule_args(wins=4), True, [], 10.0, id="n30_net4_passes"),
+    pytest.param(rule_args(n=37, wins=4), True, [], 300 / 37, id="n37_band"),
+    pytest.param(rule_args(n=38, wins=4), True, [], 8.0, id="n38_band_floor"),
+    pytest.param(rule_args(n=40, wins=4), True, [], 8.0, id="n40_band_floor"),
+    pytest.param(rule_args(standalone_losses=1), False, ["c"], None, id="standalone_loss_fails_c"),
+    pytest.param(rule_args(regression_identical=False), False, ["d"], None, id="regression_changed_fails_d"),
+    pytest.param(rule_args(regression_calls=1), False, ["d"], None, id="regression_call_fails_d"),
+    pytest.param(rule_args(fallbacks=2), True, [], None, id="fallback_2_of_20_passes_e"),
+    pytest.param(rule_args(fallbacks=3), False, ["e"], None, id="fallback_3_of_20_fails_e"),
+    pytest.param(rule_args(gate_calls=0), False, ["e"], None, id="no_gate_call_fails_e"),
+    pytest.param(rule_args(all_approved=False), False, ["f"], None, id="pending_fails_f"),
+    pytest.param(rule_args(n=0, wins=0), False, None, None, id="n0_not_evaluated"),
+    pytest.param(dict(rule_args(), on_run=False), False, None, None, id="on_not_run_not_evaluated"),
+]
+
+
+@pytest.mark.parametrize("kwargs, ship_on, failed, band", RULE_CASES)
+def test_the_rule_table(kwargs, ship_on, failed, band):
+    rule = evaluate_rule(**kwargs)
+    assert rule["ship_on"] is ship_on
+    if failed is None:
+        assert rule["evaluated"] is False and rule["reason"]
+        return
+    assert [c["label"] for c in rule["checks"]] == ["a", "b", "c", "d", "e", "f"]
+    assert [c["label"] for c in rule["checks"] if not c["passed"]] == failed
+    if band is not None:
+        assert noise_band(kwargs["n"]) == band and rule["band"] == band
+
+
+def test_the_sign_test_and_percentiles():
+    assert sign_test_p(4, 0) == 0.0625
+    assert abs(sign_test_p(8, 4) - 0.194) < 0.001
+    assert sign_test_p(0, 0) == 1.0
+    assert nearest_rank([], 50) is None
+    assert nearest_rank([3.0, 1.0, 2.0], 50) == 2.0
+    assert nearest_rank([1.0, 2.0, 3.0, 4.0], 95) == 4.0
+    assert oracle_gap_closed(10, 12, 12) is None
+    assert oracle_gap_closed(10, 12, 14) == 0.5
+
+
+def test_the_results_file_starts_with_the_rule():
+    text = (Path(conversation.ROOT) / RULE_PATH).read_text(encoding="utf-8")
+    lines = text.splitlines()
+    assert lines[0] == RULE_HEADING
+    assert next(line for line in lines if line.startswith("## ")) == RULE_HEADING
+    assert f"max({int(BAND_FLOOR_POINTS)}, {int(BAND_ITEM_POINTS)} / n)" in text
+    assert f"net >= {MIN_NET_WINS}" in text
+    assert f"<= {round(MAX_FALLBACK_RATE * 100)}% of rewriter calls" in text
+    section = rule_section(text)
+    assert section and section in " ".join((conversation.__doc__ or "").split())
+
+
+def test_the_on_arm_needs_a_committed_rule(tmp_path, monkeypatch, capsys):
+    assert scoring_refusal(["off", "on"], OK_RULE) is None
+    assert scoring_refusal(["off", "oracle"], dict(OK_RULE, clean=False)) is None
+    for key, value in (("committed", False), ("clean", False), ("unchanged", False), ("first_has_results", True)):
+        assert scoring_refusal(["on"], dict(OK_RULE, **{key: value})), key
+    out_dir = patch_main(monkeypatch, tmp_path, dict(OK_RULE, clean=False), scripted_rewriter(REPLIES))
+    with pytest.raises(SystemExit) as stop:
+        conversation.main()
+    assert stop.value.code == 2
+    assert "refusing to run the on arm" in capsys.readouterr().out
+    assert not out_dir.exists() and not (tmp_path / "conversation").exists()
+
+
+def git(repo: Path, *args: str) -> None:
+    subprocess.run(["git", "-c", "user.name=rule-test", "-c", "user.email=rule-test", "-c", "commit.gpgsign=false",
+                    *args], cwd=repo, check=True, capture_output=True)
+
+
+def new_repo(repo: Path, text: str) -> Path:
+    repo.mkdir()
+    git(repo, "init", "-q")
+    doc = repo / RULE_PATH
+    doc.parent.mkdir(parents=True)
+    doc.write_text(text, encoding="utf-8")
+    git(repo, "add", RULE_PATH)
+    git(repo, "commit", "-q", "-m", "rule")
+    return doc
+
+
+def test_rule_status_reads_git(tmp_path):
+    if shutil.which("git") is None:
+        pytest.skip("git is not installed")
+    repo = tmp_path / "repo"
+    doc = new_repo(repo, RULE_HEADING + "\n\nShip only when the gain exceeds the band.\n")
+    status = rule_status(repo)
+    assert status["committed"] and status["clean"] and status["unchanged"] and not status["first_has_results"]
+    assert len(status["rule_commit"]) == 40 and status["head"] == status["rule_commit"]
+    doc.write_text(RULE_HEADING + "\n\nShip when the gain reaches the band.\n", encoding="utf-8")
+    status = rule_status(repo)
+    assert status["committed"] and not status["clean"] and not status["unchanged"]
+    git(repo, "commit", "-q", "-am", "edit the rule")
+    status = rule_status(repo)
+    assert status["clean"] and not status["unchanged"]
+
+    other = tmp_path / "other"
+    new_repo(other, RULE_HEADING + "\n\nA rule.\n\n## Results\n\nNumbers.\n")
+    assert rule_status(other)["first_has_results"] is True
+
+
+def test_the_regression_arm_matches_off_with_no_rewriter_call():
+    result = run_regression(fixture_pipeline(), CONFIG, QUESTIONS, scripted_rewriter({}))
+    assert result["rewriter_calls"] == 0 and result["gate_fired"] == 0
+    assert result["identical"] == result["n"] == 2
+
+
+def test_the_regression_arm_detects_a_rewriter_call(monkeypatch):
+    monkeypatch.setattr(conversation, "needs_rewrite", lambda message, win: True)
+    swap = {QUESTIONS[1].question: "REWRITE: what does a write ahead log record before the tree page?"}
+    result = run_regression(fixture_pipeline(), CONFIG, QUESTIONS, scripted_rewriter(swap))
+    assert result["rewriter_calls"] > 0 and result["identical"] < 2
+    rule = evaluate_rule(**rule_args(regression_identical=result["identical"] == result["n"],
+                                     regression_calls=result["rewriter_calls"]))
+    assert [c["label"] for c in rule["checks"] if not c["passed"]] == ["d"]
+
+
+QWEN = {"spec": "ollama:qwen2.5:7b", "on_hit@5": 0.60, "p50": 900.0}
+
+
+def gpt(hit: float, p50: Optional[float]) -> Dict[str, Any]:
+    return {"spec": "vllm:/models/gpt-oss-20b", "on_hit@5": hit, "p50": p50}
+
+
+CHOICE_CASES = [
+    pytest.param(None, "ollama:qwen2.5:7b", "qwen by default, not compared", id="no_second_run"),
+    pytest.param(gpt(0.71, 5000.0), "vllm:/models/gpt-oss-20b", "on hit@5 higher by more than the band",
+                 id="second_better_by_more_than_band"),
+    pytest.param(gpt(0.70, 5000.0), "ollama:qwen2.5:7b", "inside the band; lower p50 latency", id="exactly_the_band"),
+    pytest.param(gpt(0.65, 500.0), "vllm:/models/gpt-oss-20b", "inside the band; lower p50 latency",
+                 id="inside_band_second_faster"),
+    pytest.param(gpt(0.62, 5000.0), "ollama:qwen2.5:7b", "inside the band; lower p50 latency",
+                 id="inside_band_first_faster"),
+    pytest.param(gpt(0.45, 100.0), "ollama:qwen2.5:7b", "on hit@5 higher by more than the band",
+                 id="first_better_by_more_than_band"),
+    pytest.param(gpt(0.60, None), "ollama:qwen2.5:7b", "inside the band; lower p50 latency", id="missing_latency"),
+]
+
+
+@pytest.mark.parametrize("second, chosen, reason", CHOICE_CASES)
+def test_the_rewriter_choice_table(second, chosen, reason):
+    assert choose_rewriter(QWEN, second, 10.0) == {"chosen": chosen, "reason": reason}
+
+
+def test_the_results_text_holds_no_model_text():
+    marker = "zanzibarquux"
+    replies = {"Why is that needed?": "REWRITE: " + REWRITE_P1.rstrip("?") + " " + marker + "?",
+               "Which one is it?": "CLARIFY: do you mean the write ahead log or the event stream " + marker + "?"}
+    pipeline = fixture_pipeline()
+    rows, traces = run_arms(pipeline, CONFIG, ITEMS, ["off", "on", "oracle", "concat"], scripted_rewriter(replies))
+    assert marker in rows[0]["rewrite"]["rewritten_question"] and marker in rows[2]["rewrite"]["clarify_question"]
+    regression = run_regression(pipeline, CONFIG, QUESTIONS, scripted_rewriter({}))
+    report = build_report(rows, regression)
+    rag = RagPipeline(pipeline, FakeLLM(lambda system, user: "Logged first, " + marker + " [S1]."))
+    report["answers"] = run_answers(rag, fake_judge(lambda n: [True] * n), ITEMS, rows, traces)
+    report["answers_summary"] = conversation.answers_summary(report["answers"])
+    report["slot"] = conversation.slot_decision(report["answers_summary"], report["summary"]["band"])
+    report["judge_same_as_rewriter"] = True
+    text = render_results(report)
+    lines = text.splitlines()
+    for label in RESULT_LABELS:
+        assert any(line.startswith(label) for line in lines), label
+    last = [line for line in lines if line.strip()][-1]
+    assert last.startswith("Decision: ships off") and "provisional: items pending human review" in last
+    assert sum(1 for line in lines if line.startswith("Decision:")) == 1
+    assert marker not in text
