@@ -134,6 +134,10 @@ class ConversationStore:
 
     Two locks: `lock` (a re-entrant lock) serialises every file write, every purge, and the service's
     folder removal during a document delete; `_mutex` guards only the busy set of leased conversations.
+
+    The service calls `purge_document` after removing the document folder and before it clears the
+    document from its deleting set, inside `with store.lock:`, so a writer either finishes first and
+    its file is removed, or starts later and is dropped by the liveness check.
     """
 
     def __init__(self, root: Path, max_turns: int = CONVERSATION_MAX_TURNS,
@@ -292,3 +296,46 @@ class ConversationStore:
             except FileNotFoundError:
                 return self._drop()
             return True
+
+    # ---- caps and the delete cascade ----------------------------------------------------
+
+    def check_room(self, turns: Sequence[Dict[str, Any]]) -> None:
+        """Refuse the next turn before retrieval and before any model call, so a conversation holds at
+        most `max_turns` turns and stops growing once its stored words reach `max_words`."""
+        if len(turns) >= self.max_turns:
+            raise ConversationFull()
+        words = sum(len(turn["question"].split()) + len(turn["answer"].split()) for turn in turns)
+        if words >= self.max_words:
+            raise ConversationFull()
+
+    def _unlink(self, path: Path) -> None:
+        self._retry(lambda: path.unlink(missing_ok=True), PermissionError)
+
+    def purge_document(self, owner: str, doc_id: str) -> int:
+        """Remove every cross-document conversation of this owner whose header or any turn names
+        `doc_id`, every file that cannot be parsed and every temporary file. Returns the count."""
+        with self.lock:
+            folder = self.root / CONVERSATIONS_DIR / owner_key(owner)
+            if not folder.is_dir():
+                return 0
+            removed = 0
+            for temporary in folder.glob("*.json.tmp"):  # a crash mid-write can leave conversation text here
+                self._unlink(temporary)
+                removed += 1
+            for path in folder.glob("*.json"):
+                try:
+                    data = json.loads(path.read_text(encoding="utf-8"))
+                    touched = set(data["header"]["doc_ids"])
+                    for turn in data["turns"]:
+                        touched.update(turn["doc_ids"])
+                    remove = doc_id in touched  # exact membership, never a substring test
+                except FileNotFoundError:
+                    continue
+                except (OSError, ValueError, KeyError, TypeError):
+                    remove = True  # cannot be proven unrelated to the deleted document
+                if remove:
+                    self._unlink(path)
+                    removed += 1
+            if removed:
+                logger.info("removed %d conversation file(s) after a document delete", removed)
+            return removed
