@@ -939,3 +939,28 @@ def test_an_id_up_to_512_characters_gets_the_404_and_a_longer_one_is_a_422(tmp_p
             assert response.status_code == 404 and response.content == NO_SUCH_CONVERSATION, (route, len(bad))
         too_long = client.post(route, json={"question": "replication", "conversation_id": "a" * 513})
         assert too_long.status_code == 422, route
+
+
+def test_deleting_a_document_also_deletes_its_conversations(tmp_path):
+    client, _ = make_client(tmp_path)
+    doc_id = upload(client, make_pdf(REPLICATION)).json()["id"]
+    one = client.post(f"/v1/documents/{doc_id}/ask", json={"question": "replication"}).json()["conversation_id"]
+    second = client.post(f"/v1/documents/{doc_id}/ask", json={"question": "and on failure?", "conversation_id": one})
+    assert second.status_code == 200 and second.json()["turn"] == 2
+    every = client.post("/v1/ask", json={"question": "replication"}).json()["conversation_id"]  # all documents
+    assert (tmp_path / "uploads" / doc_id / "chat" / "conversations" / f"{one}.json").is_file()
+    assert (tmp_path / "uploads" / "_conversations" / owner_key("local") / f"{every}.json").is_file()
+
+    assert client.delete(f"/v1/documents/{doc_id}").status_code == 204
+    assert not list(tmp_path.rglob("*.json"))  # no conversation that lived with or touched the document is left
+
+
+def test_repeated_document_ids_are_one_single_document_conversation(tmp_path):
+    client, _ = make_client(tmp_path)
+    doc_id = upload(client, make_pdf(REPLICATION)).json()["id"]
+    cid = client.post("/v1/ask", json={"question": "replication", "doc_ids": [doc_id, doc_id]}).json()["conversation_id"]
+    assert (tmp_path / "uploads" / doc_id / "chat" / "conversations" / f"{cid}.json").is_file()
+    assert not (tmp_path / "uploads" / "_conversations").exists()
+
+    follow = client.post(f"/v1/documents/{doc_id}/ask", json={"question": "and on failure?", "conversation_id": cid})
+    assert follow.status_code == 200 and follow.json()["conversation_id"] == cid and follow.json()["turn"] == 2
