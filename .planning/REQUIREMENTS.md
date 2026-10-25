@@ -32,9 +32,9 @@ Requirements for the chat-memory milestone. Each maps to roadmap phases.
 
 ### Evaluation (R8)
 
-- [ ] **EVAL-01** (R8): A multi-turn golden set under `data/golden/` with at least a pronoun follow-up, a topic switch, an ambiguous follow-up and a standalone question inside a conversation, each with the human-written standalone question and PDF gold pages, loaded by its own loader (`load_golden` rejects unknown keys)
-- [ ] **EVAL-02** (R8): An experiment under `rag/experiments/` scores retrieval on the rewritten query and the answer on the last turn, with rewriting on and off (and an oracle arm using the human standalone question), using identical teacher-forced histories per arm and the per-question fact checklist judge
-- [ ] **EVAL-03** (R8): Rewriting ships on by default only if it shows a gain outside the noise band recomputed for the set's size; otherwise it ships off with the numbers recorded in the repo; the shipping rule is written down before the first run
+- [x] **EVAL-01** (R8): A multi-turn golden set under `data/golden/` with at least a pronoun follow-up, a topic switch, an ambiguous follow-up and a standalone question inside a conversation, each with the human-written standalone question and PDF gold pages, loaded by its own loader (`load_golden` rejects unknown keys)
+- [x] **EVAL-02** (R8): An experiment under `rag/experiments/` scores retrieval on the rewritten query and the answer on the last turn, with rewriting on and off (and an oracle arm using the human standalone question), using identical teacher-forced histories per arm and the per-question fact checklist judge
+- [x] **EVAL-03** (R8): Rewriting ships on by default only if it shows a gain outside the noise band recomputed for the set's size; otherwise it ships off with the numbers recorded in the repo; the shipping rule is written down before the first run
 
 ### Chat page (R9)
 
@@ -110,9 +110,9 @@ Which phases cover which requirements. Updated during roadmap creation.
 | PRMT-02 | Phase 1 | Complete |
 | PRMT-03 | Phase 2 | Complete |
 | PRMT-04 | Phase 2 | Complete |
-| EVAL-01 | Phase 4 | Pending |
-| EVAL-02 | Phase 4 | Pending |
-| EVAL-03 | Phase 4 | Pending |
+| EVAL-01 | Phase 4 | Complete |
+| EVAL-02 | Phase 4 | Complete |
+| EVAL-03 | Phase 4 | Complete |
 | PAGE-01 | Phase 5 | Pending |
 | PAGE-02 | Phase 5 | Pending |
 | DOCS-01 | Phase 5 | Pending |

@@ -19,7 +19,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [x] **Phase 1: Safety net and prompt seam** - Pin single-turn prompts, retrieval numbers and the test baseline before any shared function is edited (completed 2026-10-25)
 - [x] **Phase 2: Conversation store and memory in the answer prompt** - Owner-scoped, deletable server-side history that the answer prompt uses, rewrite off (completed 2026-10-25)
 - [x] **Phase 3: Rewrite, clarify and topic switch** - Standalone-question rewrite before retrieval, one clarifying question, clean history on a topic switch, behind a default-off switch (completed 2026-10-25)
-- [ ] **Phase 4: Multi-turn evaluation and the default decision** - Multi-turn golden set and an on/off/oracle experiment that sets the rewrite default
+- [x] **Phase 4: Multi-turn evaluation and the default decision** - Multi-turn golden set and an on/off/oracle experiment that sets the rewrite default (completed 2026-10-26)
 - [ ] **Phase 5: Chat page and honest docs** - Page keeps and resets the conversation, shows clarifying questions, and the docs describe only what was built and measured
 
 ## Phase Details
@@ -154,36 +154,36 @@ Plans:
   4. The rewrite switch's default follows the rule: on only if the gain clears the band, otherwise off with the numbers recorded; the rewriter model and the question slot in the answer prompt are decided from the recorded latency and quality numbers.
   5. Replaying the existing 37 answerable questions as first turns of a conversation with rewriting on gives the same retrieval as with it off, and hit@5 0.865 / mrr 0.663 on the single-turn command are unchanged.
 
-**Plans:** 10 plans
+**Plans:** 10/10 plans complete
 
 Plans:
 **Wave 1**
-- [ ] 04-01-PLAN.md — Phase 1-3 contract check, P4_BASE, rag/observe/golden_conversations.py: schema, validation, GoldQuestion adapter, page-check CLI (wave 1)
-- [ ] 04-02-PLAN.md — docs/chat_memory_eval.md: the shipping rule committed alone before any scored run (wave 1)
+- [x] 04-01-PLAN.md — Phase 1-3 contract check, P4_BASE, rag/observe/golden_conversations.py: schema, validation, GoldQuestion adapter, page-check CLI (wave 1)
+- [x] 04-02-PLAN.md — docs/chat_memory_eval.md: the shipping rule committed alone before any scored run (wave 1)
 
 **Wave 2** *(blocked on Wave 1 completion)*
-- [ ] 04-03-PLAN.md — rag/experiments/conversation.py part 1: four arms on teacher-forced histories, strict scoring, rewrite and clarify scoring, regression arm, rule guard, preflight, --check-set (wave 2)
+- [x] 04-03-PLAN.md — rag/experiments/conversation.py part 1: four arms on teacher-forced histories, strict scoring, rewrite and clarify scoring, regression arm, rule guard, preflight, --check-set (wave 2)
 
 **Wave 3** *(blocked on Wave 2 completion)*
-- [ ] 04-04-PLAN.md — rag/experiments/conversation.py part 2: paired stats, sign test, evaluate_rule, repeats, fact-checklist answers, rewriter choice, render_results (wave 3)
+- [x] 04-04-PLAN.md — rag/experiments/conversation.py part 2: paired stats, sign test, evaluate_rule, repeats, fact-checklist answers, rewriter choice, render_results (wave 3)
 
 **Wave 4** *(blocked on Wave 3 completion)*
-- [ ] 04-05-PLAN.md — data/golden/ddia_conversations.jsonl and MULTITURN_REVIEW.md: author, page-check, rule-first checkpoint, --check-set discrimination, freeze (wave 4)
+- [x] 04-05-PLAN.md — data/golden/ddia_conversations.jsonl and MULTITURN_REVIEW.md: author, page-check, rule-first checkpoint, --check-set discrimination, freeze (wave 4)
 
 **Wave 5** *(blocked on Wave 4 completion)*
-- [ ] 04-06-PLAN.md — tests/test_golden_conversations.py: reject table, edges, load_golden unchanged, committed set (wave 5)
+- [x] 04-06-PLAN.md — tests/test_golden_conversations.py: reject table, edges, load_golden unchanged, committed set (wave 5)
 
 **Wave 6** *(blocked on Wave 5 completion)*
-- [ ] 04-07-PLAN.md — tests/test_conversation_experiment.py: offline smoke, arms, history, tables, fallback, clarify, answers, rule table, guard, regression (wave 6)
+- [x] 04-07-PLAN.md — tests/test_conversation_experiment.py: offline smoke, arms, history, tables, fallback, clarify, answers, rule table, guard, regression (wave 6)
 
 **Wave 7** *(blocked on Wave 6 completion)*
-- [ ] 04-08-PLAN.md — Live scored run (qwen, gpt-oss comparison if the tunnel is up), Results committed below the rule, STATE.md blocker for skipped arms (wave 7)
+- [x] 04-08-PLAN.md — Live scored run (qwen, gpt-oss comparison if the tunnel is up), Results committed below the rule, STATE.md blocker for skipped arms (wave 7)
 
 **Wave 8** *(blocked on Wave 7 completion)*
-- [ ] 04-09-PLAN.md — Apply the decision: default-matches-decision and rewriter-choice tests; flip, rewriter default or question slot only if the Results require it (wave 8)
+- [x] 04-09-PLAN.md — Apply the decision: default-matches-decision and rewriter-choice tests; flip, rewriter default or question slot only if the Results require it (wave 8)
 
 **Wave 9** *(blocked on Wave 8 completion)*
-- [ ] 04-10-PLAN.md — Phase gate: full suite, retrieval invariant, regression replay, rule-first check, prohibitions; Phase 4 baseline and owner flag in STATE.md (wave 9)
+- [x] 04-10-PLAN.md — Phase gate: full suite, retrieval invariant, regression replay, rule-first check, prohibitions; Phase 4 baseline and owner flag in STATE.md (wave 9)
 
 Scope note (not a criterion): golden-item authoring starts during Phase 3 on purpose, so the rewriter is not tuned to its own examples; the set is complete and loaded here.
 
@@ -255,5 +255,5 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5
 | 1. Safety net and prompt seam | 7/7 | Complete    | 2026-10-25 |
 | 2. Conversation store and memory in the answer prompt | 9/9 | Complete    | 2026-10-25 |
 | 3. Rewrite, clarify and topic switch | 8/8 | Complete    | 2026-10-25 |
-| 4. Multi-turn evaluation and the default decision | 0/TBD | Not started | - |
+| 4. Multi-turn evaluation and the default decision | 10/10 | Complete    | 2026-10-26 |
 | 5. Chat page and honest docs | 0/TBD | Not started | - |
