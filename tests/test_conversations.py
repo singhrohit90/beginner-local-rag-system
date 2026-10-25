@@ -4,7 +4,10 @@ prompts with and without history, and the no-disk-cache rule; plan 02-08 adds th
 concurrency and cap tests below them."""
 
 import ast
+import gc
 import json
+import re
+import threading
 from datetime import datetime
 from pathlib import Path
 
@@ -15,7 +18,7 @@ from rag.api.conversations import ConversationStore, new_turn, owner_key, to_his
 from rag.api.main import create_app, current_owner
 from rag.api.service import DocumentService
 from rag.common.embed import HashingEmbedder
-from rag.common.llm import FakeLLM
+from rag.common.llm import FakeLLM, LLMResult, StreamPiece
 from rag.common.trace import load_trace
 from rag.query.generate import build_prompts
 from rag.query.guard import BLOCKED
@@ -269,3 +272,59 @@ def test_no_get_llm_call_in_rag_api_omits_cache_dir_none():
             assert cache and isinstance(cache[0].value, ast.Constant) and cache[0].value.value is None, (
                 f"{path.name}:{node.lineno} calls get_llm without cache_dir=None")
     assert found
+
+
+class GatedLLM(FakeLLM):
+    """A fake model that blocks inside the model call until the test releases it, so the test decides
+    what overlaps the turn. Every wait has a 30-second ceiling; nothing sleeps."""
+
+    def __init__(self, reply="Copies live on several nodes [S1]."):
+        super().__init__(lambda system, user: reply)
+        self.reply = reply
+        self.prompts = []
+        self.started = threading.Event()
+        self.release = threading.Event()
+
+    def generate(self, system, user, *args, **kwargs):
+        self.prompts.append((system, user))
+        self.started.set()
+        assert self.release.wait(30)
+        return LLMResult(text=self.reply)
+
+    def generate_stream(self, system, user, *args, **kwargs):
+        self.prompts.append((system, user))
+        self.started.set()
+        assert self.release.wait(30)
+        yield StreamPiece(text=self.reply)
+        yield StreamPiece(result=LLMResult(text=self.reply))
+
+
+@pytest.mark.parametrize("streamed", [False, True], ids=["ordinary", "streamed"])
+@pytest.mark.parametrize("scope", ["one document", "all documents"])
+def test_a_delete_during_a_turn_leaves_no_conversation_file(tmp_path, scope, streamed):
+    service = make_service(tmp_path)
+    doc_id = add_document(service, REPLICATION)
+    doc_ids = [doc_id] if scope == "one document" else None
+    gated = GatedLLM()
+    service.llm = gated
+    outcome = []
+
+    def ask():
+        if streamed:
+            outcome.append(list(service.ask_documents_stream("local", doc_ids, "What does replication do?"))[-1]["data"])
+        else:
+            outcome.append(service.ask_documents("local", doc_ids, "What does replication do?"))
+
+    asker = threading.Thread(target=ask)
+    asker.start()
+    try:
+        assert gated.started.wait(30)  # past retrieval, inside the model call
+        service.delete(doc_id, "local")  # synchronous: finished before the writer runs
+    finally:
+        gated.release.set()
+    asker.join(30)
+    assert not asker.is_alive()
+    assert len(outcome) == 1 and re.fullmatch(r"[0-9a-f]{32}", outcome[0]["conversation_id"])  # still answered
+    assert not (service.root / doc_id).exists()
+    assert [p for p in service.root.rglob("*") if p.is_file()] == []
+    assert service.conversations.dropped_writes == 1
