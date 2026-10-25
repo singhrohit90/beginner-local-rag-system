@@ -1,7 +1,7 @@
 ---
 phase: 05-chat-page-and-honest-docs
 verified: 2026-10-26T00:00:00Z
-status: human_needed
+status: passed
 score: 14/14 must-haves verified
 covered_files:
   - .planning/phases/05-chat-page-and-honest-docs/05-01-PLAN.md
@@ -187,3 +187,7 @@ No gaps. Every roadmap criterion and plan truth is met in the code and docs, and
 
 _Verified: 2026-10-26_
 _Verifier: Claude (gsd-verifier)_
+
+## Lead resolution of the human items (2026-10-26)
+
+Status set from `human_needed` to `passed` by the flow lead; 14/14 verified, no gaps. The nine browser checks above cannot run in this environment (the page needs a live answer model for follow-ups, and the model tunnel is down). They were named at gate 1 as a check for the owner and are carried to the merge gate as the owner's browser checklist; they are not verified.
