@@ -16,7 +16,7 @@ Scope is the 18 v1 requirements in `.planning/REQUIREMENTS.md`. v2 items stay ou
 
 Decimal phases appear between their surrounding integers in numeric order.
 
-- [ ] **Phase 1: Safety net and prompt seam** - Pin single-turn prompts, retrieval numbers and the test baseline before any shared function is edited
+- [x] **Phase 1: Safety net and prompt seam** - Pin single-turn prompts, retrieval numbers and the test baseline before any shared function is edited (completed 2026-10-25)
 - [ ] **Phase 2: Conversation store and memory in the answer prompt** - Owner-scoped, deletable server-side history that the answer prompt uses, rewrite off
 - [ ] **Phase 3: Rewrite, clarify and topic switch** - Standalone-question rewrite before retrieval, one clarifying question, clean history on a topic switch, behind a default-off switch
 - [ ] **Phase 4: Multi-turn evaluation and the default decision** - Multi-turn golden set and an on/off/oracle experiment that sets the rewrite default
@@ -36,25 +36,25 @@ Decimal phases appear between their surrounding integers in numeric order.
   3. `python -m rag.experiments.retrieval --chunkers semantic --configs weighted` still prints hit@5 0.865 and mrr 0.663, and `python -m pytest tests -q` still reports 591 passed, 2 skipped; both results are recorded for later phases to compare against.
   4. The model server's context window (`max_model_len`) is read once and written into `docs/models.md`, so the history caps pinned in Phase 2 rest on a recorded number, not a guess.
 
-**Plans:** 7 plans
+**Plans:** 7/7 plans complete
 
 Plans:
 **Wave 1**
-- [ ] 01-01-PLAN.md — Snapshot of single-turn prompt bytes (24 cases + 45 golden digests) committed on unedited code; retrieval invariant run 1 (wave 1)
-- [ ] 01-02-PLAN.md — Read max_model_len once and record it (or the dated not-read reason and 8192 floor) in docs/models.md and STATE.md (wave 1)
+- [x] 01-01-PLAN.md — Snapshot of single-turn prompt bytes (24 cases + 45 golden digests) committed on unedited code; retrieval invariant run 1 (wave 1)
+- [x] 01-02-PLAN.md — Read max_model_len once and record it (or the dated not-read reason and 8192 floor) in docs/models.md and STATE.md (wave 1)
 
 **Wave 2** *(blocked on Wave 1 completion)*
-- [ ] 01-03-PLAN.md — history_block seam through the four prompt builders and RagPipeline.answer/stream, empty default byte-identical (wave 2)
-- [ ] 01-05-PLAN.md — Pure rag/query/history.py: HistoryTurn, window, neutralize, render_block, D-10 budget constants (wave 2)
+- [x] 01-03-PLAN.md — history_block seam through the four prompt builders and RagPipeline.answer/stream, empty default byte-identical (wave 2)
+- [x] 01-05-PLAN.md — Pure rag/query/history.py: HistoryTurn, window, neutralize, render_block, D-10 budget constants (wave 2)
 
 **Wave 3** *(blocked on Wave 2 completion)*
-- [ ] 01-04-PLAN.md — Seam tests: empty == no argument == snapshot, block position in every style, pipeline forwarding (wave 3)
+- [x] 01-04-PLAN.md — Seam tests: empty == no argument == snapshot, block position in every style, pipeline forwarding (wave 3)
 
 **Wave 4** *(blocked on Wave 3 completion)*
-- [ ] 01-06-PLAN.md — History unit tests and the worst-case context-window budget test (wave 4; after 01-04 so their fail-first checkouts never overlap)
+- [x] 01-06-PLAN.md — History unit tests and the worst-case context-window budget test (wave 4; after 01-04 so their fail-first checkouts never overlap)
 
 **Wave 5** *(blocked on Wave 4 completion)*
-- [ ] 01-07-PLAN.md — Retrieval invariant run 2, full suite, phase prohibition checks, baseline recorded for Phase 2 (wave 5)
+- [x] 01-07-PLAN.md — Retrieval invariant run 2, full suite, phase prohibition checks, baseline recorded for Phase 2 (wave 5)
 
 Scope note (not a criterion): this phase also lands the pure history helpers (window, neutralize, render) and the budget constants as unwired groundwork. The requirements that use them (history in the prompt, untrusted history, budget) are verified end to end in Phase 2.
 
@@ -252,7 +252,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Safety net and prompt seam | 0/TBD | Not started | - |
+| 1. Safety net and prompt seam | 7/7 | Complete    | 2026-10-25 |
 | 2. Conversation store and memory in the answer prompt | 0/TBD | Not started | - |
 | 3. Rewrite, clarify and topic switch | 0/TBD | Not started | - |
 | 4. Multi-turn evaluation and the default decision | 0/TBD | Not started | - |

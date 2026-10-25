@@ -26,7 +26,7 @@ Requirements for the chat-memory milestone. Each maps to roadmap phases.
 ### Prompt, trust and budget (R5, R6, R7)
 
 - [ ] **PRMT-01** (R5): `build_prompts` (`rag/query/generate.py:51`) gains an optional history block of the last N turns holding questions and short answers, not full earlier answers; `SYSTEM_PROMPT` and `DOCUMENT_SYSTEM_PROMPT` are not changed
-- [ ] **PRMT-02** (R5): With no history the produced prompt is byte-identical to today's, so golden results and the LLM cache are unaffected (test: prompt equality on the golden set, snapshot committed before the first edit)
+- [x] **PRMT-02** (R5): With no history the produced prompt is byte-identical to today's, so golden results and the LLM cache are unaffected (test: prompt equality on the golden set, snapshot committed before the first edit)
 - [ ] **PRMT-03** (R6): Stored turns go through `scan_text` and are shown and reused only after `filter_output`-style defanging (`rag/query/guard.py`), with stale `[S n]` citation markers stripped; the page renders history with `textContent`; streamed answers still go only through `StreamGuard`
 - [ ] **PRMT-04** (R7): History plus passages plus answer budget (including the reasoning model's 3000 thinking tokens, `docs/models.md`) fits the context window; a hard cap on turns/words per conversation is enforced before any model call with a clear error to the client; compaction is deferred (constants are open decision D3, pinned after the server's `max_model_len` is recorded)
 
@@ -107,7 +107,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | RWR-03 | Phase 3 | Pending |
 | RWR-04 | Phase 3 | Pending |
 | PRMT-01 | Phase 2 | Pending |
-| PRMT-02 | Phase 1 | Pending |
+| PRMT-02 | Phase 1 | Complete |
 | PRMT-03 | Phase 2 | Pending |
 | PRMT-04 | Phase 2 | Pending |
 | EVAL-01 | Phase 4 | Pending |
