@@ -31,9 +31,11 @@ def page_text(tmp_path) -> str:
     scratch file, without ever putting that page into the working tree or the index."""
     override = os.environ.get("PAGE_UNDER_TEST")
     if override:
-        return Path(override).read_text(encoding="utf-8")
-    client, _ = make_client(tmp_path)
-    return client.get("/").text
+        text = Path(override).read_text(encoding="utf-8")
+    else:
+        client, _ = make_client(tmp_path)
+        text = client.get("/").text
+    return text.replace("\r\n", "\n")  # the checkout may have CRLF line ends
 
 
 def script_text(tmp_path) -> str:
@@ -111,3 +113,120 @@ def test_another_404_is_an_ordinary_error_without_a_retry(tmp_path):
     assert "no answer" in obs["logText"]
     assert obs["conversationId"] == A_ID
     assert "Started a new conversation" not in obs["logText"]
+
+
+def test_conversation_conflicts_read_as_sentences_and_keep_the_id(tmp_path):
+    obs = run_harness(tmp_path, "conflict_409")
+    full, busy = obs["full"], obs["busy"]
+    assert len(full["askBodies"]) == 1 and full["askBodies"][0]["conversation_id"] == A_ID
+    assert SERVER_STRINGS["full"] + " Use the New conversation button." in full["errorText"]
+    assert "409:" not in full["errorText"]
+    assert full["conversationId"] == A_ID and full["sendDisabled"] is False
+    assert len(busy["askBodies"]) == 2  # the busy answer is not retried
+    assert SERVER_STRINGS["busy"] in busy["errorText"] and "409:" not in busy["errorText"]
+    assert busy["conversationId"] == A_ID and busy["sendDisabled"] is False
+
+
+def test_a_clarifying_question_shows_markup_as_text(tmp_path):
+    obs = run_harness(tmp_path, "clarify")
+    shown, after = obs["shown"], obs["after"]
+    assert "Do you mean <b>x</b> or the other one?" in shown["logText"]
+    assert "clarifying question" in shown["logText"]
+    assert "B" not in shown["logTags"]  # the tag stayed text; no element was made from it
+    assert shown["detailText"] == "A clarifying question: no passages were retrieved for it."
+    assert "Stages" not in shown["detailText"] and "Passages sent to the model" not in shown["detailText"]
+    assert shown["conversationId"] == A_ID
+    assert after["askBodies"][1]["conversation_id"] == A_ID
+
+
+def test_a_superseded_ask_is_aborted_and_cannot_bring_its_id_back(tmp_path):
+    obs = run_harness(tmp_path, "superseded")
+    assert obs["abortedAtReset"] is True
+    assert obs["conversationId"] is None
+    assert obs["logText"] == "" and obs["errorText"] == ""
+    assert obs["sendDisabled"] is False
+    assert len(obs["askBodies"]) == 1
+
+
+def test_the_page_declares_one_conversation_id_and_sends_it_only_when_set(tmp_path):
+    page = page_text(tmp_path)
+    assert page.count("let conversationId = null, epoch = 0, inflight = null;") == 1
+    assert "if (conversationId) body.conversation_id = conversationId;" in page
+    assert "conversationId = r.conversation_id" in page
+    for stored in ("localStorage", "sessionStorage", "document.cookie"):
+        assert stored not in page
+    assert all("conversation" not in line for line in page.splitlines() if "/v1/ask-about" in line)
+
+
+def test_the_new_conversation_button_does_not_submit_and_sits_before_ask(tmp_path):
+    page = page_text(tmp_path)
+    assert '<button type="button" id="newconv"' in page
+    assert (page.index('id="question"') < page.index('id="scope"') < page.index('id="config"')
+            < page.index('id="newconv"') < page.index('id="send"'))
+    assert '$("newconv").onclick' in page
+
+
+def test_every_target_change_resets_the_conversation(tmp_path):
+    page = page_text(tmp_path)
+
+    def cut(start: str, end: str) -> str:
+        at = page.index(start)
+        return page[at:page.index(end, at)]
+
+    assert page.count("resetConversation(") == 7  # the definition and six call sites
+    scope_line = next(line for line in page.splitlines() if '$("scope").onchange' in line)
+    assert "resetConversation(" in scope_line
+    select = cut("function select(", "function scopeLabel")
+    assert "resetConversation(" in select and '$("scope").value === "one"' in select
+    pick = cut("pick.onclick", "node.prepend(pick)")
+    assert "resetConversation(" in pick and '$("scope").value === "checked"' in pick
+    delete = cut("del.onclick", 'node.append(el("div", {}, del))')
+    assert delete.index("targets()") < delete.index("await") < delete.index("resetConversation(")
+    upload = cut('$("upload").onsubmit', "async function streamAsk")
+    assert upload.index("resetConversation(") < upload.index("selected = d.id")
+
+
+def test_a_stale_id_is_retried_once_and_other_errors_are_not(tmp_path):
+    page = page_text(tmp_path)
+    assert 'const CONV_GONE = "no such conversation";' in page
+    assert "sent && err.status === 404 && err.detail === CONV_GONE" in page
+    assert page.count("Started a new conversation (the previous one is no longer available).") == 1
+    at = page.index("function askContent(")
+    ask_content = page[at:page.index("\n}\n", at)]
+    assert ask_content.count("streamAsk(") == 2 and "delete body.conversation_id;" in ask_content
+
+
+def test_a_running_ask_can_be_cancelled(tmp_path):
+    page = page_text(tmp_path)
+    assert page.count("new AbortController") == 1
+    at = page.index("async function streamAsk")
+    assert "signal" in page[at:page.index("getReader", at)]
+    assert "inflight.abort()" in page
+    assert "if (mine !== epoch) return;" in page
+
+
+def test_a_clarifying_question_is_labelled_and_has_no_passages_panel(tmp_path):
+    page = page_text(tmp_path)
+    assert 'r.kind === "clarify"' in page
+    assert "clarifying question" in page
+    assert "function detailClarify()" in page
+
+
+def test_the_page_builds_no_markup_from_text(tmp_path):
+    page = page_text(tmp_path)
+    assert page.count("innerHTML") == 1 and "innerHTML" not in page.replace("never innerHTML", "")
+    for markup in ("outerHTML", "insertAdjacentHTML", "document.write"):
+        assert markup not in page
+    assert page.count("</script>") == 1
+    # the strings this phase added reach the DOM through el() and text nodes
+    assert 'msg.before(el("div", { class: "meta" }, note))' in page
+    assert 'el("small", { class: "meta" }, "clarifying question")' in page
+
+
+def test_the_page_matches_the_server_conversation_errors(tmp_path):
+    main = (Path(__file__).resolve().parent.parent / "rag" / "api" / "main.py").read_text(encoding="utf-8")
+    for text in SERVER_STRINGS.values():
+        assert text in main
+    page = page_text(tmp_path)
+    for text in ("no such conversation", "conversation is full", "conversation is busy"):
+        assert text in page

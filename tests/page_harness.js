@@ -263,6 +263,45 @@ const SCENARIOS = {
     await ask(page, "and what about its drawbacks?");
     return observe(page);
   },
+
+  async conflict_409(page, strings) {
+    vm.runInContext(`conversationId = ${JSON.stringify(A_ID)}`, page.ctx);
+    page.state.replies.push({ status: 409, json: { detail: strings.full } });
+    await ask(page, "one question too many");
+    const full = observe(page);
+    page.state.replies.push({ status: 409, json: { detail: strings.busy } });
+    await ask(page, "asked from a second tab");
+    return { full, busy: observe(page) };
+  },
+
+  async clarify(page) {
+    page.state.replies.push(
+      { final: finalEvent(A_ID, { kind: "clarify", answer: "Do you mean <b>x</b> or the other one?", citations: [],
+                                  llm: "rewriter", query_id: "clarify-1", turn: 2,
+                                  rewrite: { status: "clarify", reason: null, rewritten_question: null } }) },
+      { final: finalEvent(A_ID, { turn: 3 }) });
+    await ask(page, "and what about its drawbacks?");
+    const shown = observe(page);
+    await ask(page, "the first one");
+    return { shown, after: observe(page) };
+  },
+
+  async superseded(page) {
+    page.state.replies.push({ hold: true });
+    const asking = ask(page, "a slow question");
+    await waitFor(() => page.state.calls.some((c) => c.url === "/v1/ask/stream") && page.state.held, "stream held");
+    page.$("newconv").click();
+    const call = page.state.calls.find((c) => c.url === "/v1/ask/stream");
+    const abortedAtReset = Boolean(call.signal && call.signal.aborted);
+    // the server's answer arrives anyway, after the user started over
+    page.state.held.enqueue(frame(finalEvent(C_ID)));
+    page.state.held.close();
+    let done = false;
+    asking.then(() => { done = true; }, () => { done = true; });
+    await waitFor(() => done, "superseded ask finished");
+    await asking;
+    return Object.assign(observe(page), { abortedAtReset });
+  },
 };
 
 async function main() {
