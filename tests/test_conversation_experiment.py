@@ -188,3 +188,179 @@ def test_the_smoke_run_writes_a_complete_report(tmp_path):
     assert summary["n"] == 2 and summary["wins"] + summary["ties"] + summary["losses"] == summary["n"]
     assert render_results(report).startswith("## Results")
     assert run_listing() == before
+
+
+def question_of(prompt: str) -> str:
+    """The question line of an answer prompt (the text after the last "Question:")."""
+    return prompt.rsplit("Question:", 1)[1].strip()
+
+
+def passages_of(prompt: str) -> str:
+    return prompt.rsplit("Question:", 1)[0]
+
+
+def test_each_arm_retrieves_on_its_own_query():
+    pipeline = fixture_pipeline()
+    seen: List[Any] = []
+    spy_runs(pipeline, seen)
+    run_arms(pipeline, CONFIG, ITEMS, ["off", "on", "oracle", "concat"], scripted_rewriter(REPLIES))
+    p1 = {query_id.split("__")[1]: question for query_id, question in seen if query_id.startswith("p1__")}
+    assert p1 == {
+        "off": "Why is that needed?",
+        "oracle": "Why does a write ahead log record every change before the tree page?",
+        "concat": WAL_TURN["question"] + " " + "Why is that needed?",
+        "on": REWRITE_P1,
+    }
+    assert not [q for q in seen if q[0].startswith("a1__")]  # a clarify item is never retrieved
+
+
+def test_every_arm_sees_the_same_teacher_forced_history():
+    pipeline = fixture_pipeline()
+    rewriter_prompts: List[str] = []
+    item = ITEMS[0]
+    rows, traces = run_arms(pipeline, CONFIG, [item], ["off", "on", "oracle", "concat"],
+                            scripted_rewriter(REPLIES, rewriter_prompts))
+    block = render_block(window(teacher_history(item)))
+    assert block and block in rewriter_prompts[0]
+    answer_prompts: List[str] = []
+    rag = RagPipeline(pipeline, recording_generator(answer_prompts, "Every change is logged first [S1]."))
+    run_answers(rag, fake_judge(lambda n: [True] * n), [item], rows, traces)
+    assert len(answer_prompts) == 4  # off, oracle, on, on_original: four different slots or retrievals
+    for prompt in answer_prompts:
+        assert block in prompt and prompt.count(HISTORY_HEADER) == 1
+
+    switch = make_item(id="t1", category="topic_switch", message="What do stream processors join an event stream with?",
+                       standalone="What do stream processors join an event stream with?", gold_pages=[[3, 3]],
+                       evidence_terms=["stream processors"], must_not_contain=["tree page"])
+    rows, traces = run_arms(pipeline, CONFIG, [switch], ["off", "on", "oracle"], scripted_rewriter(
+        {switch.message: "NEW_TOPIC: " + switch.message}))
+    assert rows[0]["rewrite"]["status"] == "new_topic"
+    answer_prompts.clear()
+    results = run_answers(rag, fake_judge(lambda n: [True] * n), [switch], rows, traces)
+    with_history = [p for p in answer_prompts if HISTORY_HEADER in p]
+    without = [p for p in answer_prompts if HISTORY_HEADER not in p]
+    assert with_history and without  # off and oracle keep the history, the on variants after new_topic drop it
+    assert results[0]["on_original"]["reused"] is True  # same slot, same retrieval, same (empty) history
+
+
+def hand_row(item_id: str, off: float, on: float, oracle: float = 1.0,
+             category: str = "pronoun_follow_up") -> Dict[str, Any]:
+    def score(hit: float) -> Dict[str, Any]:
+        return {"query": "q", "hit@5": hit, "mrr": hit, "recall@5": hit, "chunk_ids": []}
+    return {"id": item_id, "category": category, "expect": "answer", "review": "pending-human", "source_id": None,
+            "expects_rewrite": True, "arms": {"off": score(off), "on": dict(score(on), false_clarify=False),
+                                              "oracle": score(oracle)},
+            "rewrite": None, "clarify": None}
+
+
+def test_paired_counts_and_category_table():
+    rows = [hand_row("h1", 0.0, 1.0), hand_row("h2", 0.0, 1.0), hand_row("h3", 1.0, 1.0), hand_row("h4", 1.0, 0.0)]
+    assert paired(rows) == {"win": 2, "tie": 1, "loss": 1, "n": 4}
+    assert [entry["category"] for entry in category_table(rows)] == list(CATEGORIES)
+    skipped = {"skipped": "not run"}
+    summary = summarise(rows, skipped, skipped)
+    assert summary["oracle_gap_closed"] is None  # oracle 4 hits minus off 2 hits is under three items
+    rule = evaluate_rule(summary["n"], summary["wins"], summary["losses"], summary["standalone_losses"], False, 0,
+                         summary["fallbacks"], summary["gate_calls"], summary["all_approved"])
+    report = {"meta": meta(), "arms_not_run": {}, "rows": rows, "regression": skipped,
+              "regression_unrelated": skipped, "summary": summary, "rule": rule}
+    assert "Oracle gap closed by on: n/a." in render_results(report)
+
+
+def test_a_fallback_is_a_counted_failure():
+    rows, _ = run_arms(fixture_pipeline(), CONFIG, ITEMS, ["off", "on"], raising(ConnectionRefusedError))
+    p1 = rows[0]
+    assert p1["rewrite"]["status"] == "fallback" and p1["rewrite"]["reason"] == "unavailable"
+    assert p1["arms"]["on"]["query"] == "Why is that needed?" and p1["arms"]["on"]["false_clarify"] is False
+    summary = summarise(rows, {"skipped": "x"}, {"skipped": "x"})
+    assert summary["fallbacks"] == summary["gate_calls"] >= 1
+    assert status_counts(rows)["reasons"].get("unavailable", 0) >= 1
+    rule = evaluate_rule(summary["n"], summary["wins"], summary["losses"], summary["standalone_losses"], True, 0,
+                         summary["fallbacks"], summary["gate_calls"], True)
+    assert [c["label"] for c in rule["checks"] if not c["passed"]][-1] == "e" and rule["ship_on"] is False
+
+
+def test_clarify_items_are_scored_apart():
+    rows, _ = run_arms(fixture_pipeline(), CONFIG, ITEMS, ["off", "on", "oracle"], scripted_rewriter(REPLIES))
+    a1 = rows[2]
+    assert a1["clarify"]["asked"] is True and a1["clarify"]["named_both"] is True
+    assert a1["clarify"]["second_clarified"] is False  # the turn after a clarification never clarifies again
+    assert all(v is None for v in a1["arms"].values())
+    assert summarise(rows, {"skipped": "x"}, {"skipped": "x"})["n"] == 2
+
+    clarifying = dict(REPLIES, **{"Why is that needed?": "CLARIFY: do you mean the write ahead log or the tree page?"})
+    rows, _ = run_arms(fixture_pipeline(), CONFIG, ITEMS, ["off", "on"], scripted_rewriter(clarifying))
+    p1_on = rows[0]["arms"]["on"]
+    assert p1_on["hit@5"] == 0.0 and p1_on["false_clarify"] is True and p1_on["query"] is None
+    assert summarise(rows, {"skipped": "x"}, {"skipped": "x"})["false_clarify"] == 1
+
+
+def test_answers_are_scored_with_the_fact_checklist(monkeypatch):
+    def never(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("the holistic correctness judge must not be called")
+
+    monkeypatch.setattr("rag.observe.generation_quality.judge.judge_correctness", never)
+    pipeline = fixture_pipeline()
+    seen: List[Any] = []
+    spy_runs(pipeline, seen)
+    item = ITEMS[0]
+    rows, traces = run_arms(pipeline, CONFIG, [item], ["off", "on", "oracle"], scripted_rewriter(REPLIES))
+    prompts: List[str] = []
+
+    def reply(system: str, user: str) -> str:
+        prompts.append(user)
+        return ABSTAIN if item.standalone in question_of(user) else "Every change is logged first [S1]."
+
+    rag = RagPipeline(pipeline, FakeLLM(reply))
+    result = run_answers(rag, fake_judge(lambda n: [True] * n), [item], rows, traces)[0]
+    assert result["oracle"]["correct"] is False and result["oracle"]["abstained"] is True
+    assert result["off"]["correct"] is True and result["on"]["correct"] is True
+    on_prompt = next(p for p in prompts if REWRITE_P1 in question_of(p))
+    original = [p for p in prompts if question_of(p) == item.message and passages_of(p) == passages_of(on_prompt)]
+    assert len(original) == 1  # on_original: the on retrieval, only the question slot differs
+    assert [q for q in seen if q[0] == "p1__on"] == [("p1__on", REWRITE_P1)]  # one on retrieval for both slots
+
+
+def patch_main(monkeypatch, tmp_path: Path, rule: Dict[str, Any], llm: Any) -> Path:
+    """main() on the fixture: no model download, no data/processed, the report under tmp_path."""
+    set_path = tmp_path / "set.jsonl"
+    set_path.write_text("".join(json.dumps(item_raw(**raw)) + "\n" for raw in raw_items()), encoding="utf-8")
+    single = tmp_path / "single.jsonl"
+    single.write_text("".join(json.dumps({"id": q.id, "question": q.question, "type": q.type,
+                                          "answerable": q.answerable, "reference_answer": q.reference_answer,
+                                          "gold_pages": [list(r) for r in q.gold_pages],
+                                          "evidence_terms": q.evidence_terms, "key_facts": q.key_facts}) + "\n"
+                              for q in QUESTIONS), encoding="utf-8")
+    monkeypatch.setattr(conversation, "get_embedder", lambda spec: HashingEmbedder())
+    monkeypatch.setattr(conversation, "load_chunkset", lambda folder, name: fixture_chunkset())
+    monkeypatch.setattr(conversation, "get_index",
+                        lambda chunkset, embedder, variant, rebuild: VectorIndex.build(chunkset.chunks, embedder))
+    monkeypatch.setattr(conversation, "rule_status", lambda root=None: dict(rule))
+    monkeypatch.setattr(conversation, "RUNS_DIR", tmp_path)
+    monkeypatch.setattr(conversation, "SINGLE_TURN_GOLDEN", single)
+    monkeypatch.setattr("rag.common.llm.get_llm", lambda spec, cache_dir=None: llm)
+    monkeypatch.setattr(sys, "argv", ["conversation", "--golden", str(set_path), "--name", "t"])
+    return tmp_path / "conversation" / "t"
+
+
+def test_an_unreachable_model_skips_its_arm(tmp_path, monkeypatch, capsys):
+    out_dir = patch_main(monkeypatch, tmp_path, OK_RULE, raising(ConnectionRefusedError))
+    conversation.main()
+    printed = capsys.readouterr().out
+    assert "arm skipped: model unreachable: on" in printed
+    report = json.loads((out_dir / "report.json").read_text(encoding="utf-8"))
+    assert "on" in report["arms_not_run"]
+    assert all(r["rewrite"] is None for r in report["rows"])
+    assert report["decision"]["ship_on"] is False and report["decision"]["line"].startswith("Decision: ships off")
+
+
+def test_repeats_report_instability_without_gating():
+    pipeline = fixture_pipeline()
+    first, _ = run_arms(pipeline, CONFIG, ITEMS, ["off", "on", "oracle"], scripted_rewriter(REPLIES))
+    clarifying = dict(REPLIES, **{"Why is that needed?": "CLARIFY: do you mean the write ahead log or the tree page?"})
+    second, _ = run_arms(pipeline, CONFIG, ITEMS, ["on"], scripted_rewriter(clarifying))
+    regression = {"n": 2, "identical": 2, "rewriter_calls": 0}
+    before = build_report(first, regression)["rule"]
+    report = instability([first, second])
+    assert report["per_repeat"][1]["changed"] == ["p1"] and report["unstable_ids"] == ["p1"]
+    assert build_report(first, regression)["rule"] == before  # the rule reads repeat 1 only
