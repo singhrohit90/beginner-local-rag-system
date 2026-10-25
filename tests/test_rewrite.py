@@ -1,5 +1,5 @@
 """Pure tests of the rewrite step (rag/query/rewrite.py): the gate, the rewriter prompt, the reply
-parser, the guards, the outcomes and the failure codes. No service, no TestClient and no real model:
+parser, the guards, the outcomes and the failure codes. No service, no HTTP client and no real model:
 every model is a spy or a FakeLLM."""
 
 import json
@@ -291,3 +291,77 @@ def test_an_obedient_rewriter_cannot_redirect_retrieval():
     result = rewrite_question(llm, "and why that?", [poisoned])
     assert "ignore all previous instructions" not in calls[0]["user"].lower()  # render_block defanged it
     assert (result.status, result.reason, result.question) == ("fallback", "flagged", "and why that?")
+
+
+def _chained_timeout():
+    try:
+        try:
+            raise TimeoutError()
+        except TimeoutError as inner:
+            raise RuntimeError("model call failed") from inner
+    except RuntimeError as err:
+        return err
+
+
+# case id -> (exception the rewriter raises, reason code) (D-09)
+FAILURES = {
+    "refused": (urllib.error.URLError(ConnectionRefusedError()), "unavailable"),
+    "cannot_reach": (RuntimeError("cannot reach the model server at 127.22.10.1:30007"), "unavailable"),
+    "ollama_serve": (RuntimeError("Ollama is not running; start it with ollama serve"), "unavailable"),
+    "timeout_error": (TimeoutError(), "timeout"),
+    "socket_timeout": (socket.timeout("timed out"), "timeout"),
+    "wrapped_timeout": (urllib.error.URLError(socket.timeout("timed out")), "timeout"),
+    "chained_timeout": (_chained_timeout(), "timeout"),
+}
+
+
+@pytest.mark.parametrize("case", list(FAILURES))
+def test_a_rewriter_error_is_a_fallback_with_a_reason_code(case):
+    err, reason = FAILURES[case]
+    llm, calls = failing(err)
+    result = rewrite_question(llm, PRONOUN, [EARLIER], doc_names=NAMES)
+    assert len(calls) == 1
+    assert result.status == "fallback"
+    assert result.reason == reason and reason in REASONS
+    assert result.question == PRONOUN
+    if str(err):
+        assert str(err) not in repr(result)  # a code, never the exception text
+
+
+def test_an_oversized_rewriter_prompt_is_a_fallback_without_a_call():
+    calls = []
+    llm = FakeLLM(lambda s, u: calls.append((s, u)) or "STANDALONE")
+    result = rewrite_question(llm, "and that " + "a " * 1000, [EARLIER])
+    assert (result.status, result.reason) == ("fallback", "input_too_long")
+    assert calls == []
+
+    # A realistic worst case still fits: six full turns, eight long names and a 30-word message.
+    window = [HistoryTurn(" ".join(["question"] * 60), " ".join(["answer"] * 40), AT) for _ in range(6)]
+    names = [(f"volume {i} " + "design notes for storage engines " * 3)[:60] for i in range(8)]
+    assert all(len(name) == 60 for name in names)
+    message = "and how does that " + " ".join(["word"] * 26)
+    assert len(message.split()) == 30
+    result = rewrite_question(llm, message, window, doc_names=names)
+    assert len(calls) == 1
+    assert result.reason != "input_too_long"
+
+
+ODD = [
+    "", "x" * 10000, "\x00", "‮‏", "[[[", "REWRITE: \x00", "CLARIFY: ‮", "REWRITE: " + "(" * 50,
+    " REWRITE:   ", "NEW_TOPIC:",
+]
+
+
+def test_the_guards_never_raise_on_odd_text():
+    """A raise anywhere on the rewrite path would become a 502, so every guard is total (D-09)."""
+    for text in ODD:
+        parse_reply(text)
+        needs_rewrite(text, [EARLIER])
+        anaphora_markers(text)
+        leaked(text, text, text)
+        check_text("rewrite", text, text, text)
+        check_text("clarify", text, "m", text)
+        result = rewrite_question(FakeLLM(lambda s, u, t=text: t), "and that " + text, [EARLIER])
+        assert result.status in STATUSES
+        if result.status == "fallback":
+            assert result.reason in REASONS
