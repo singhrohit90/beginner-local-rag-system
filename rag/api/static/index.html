@@ -135,7 +135,7 @@ async function api(path, options) {
   if (!res.ok) {
     let detail = res.statusText;
     try { detail = (await res.json()).detail || detail; } catch (_) {}
-    throw new Error(`${res.status}: ${typeof detail === "string" ? detail : JSON.stringify(detail)}`);
+    throw httpError(res.status, detail);
   }
   return res.status === 204 ? null : res.json();
 }
@@ -155,6 +155,16 @@ function longText(text, limit = 240) {
 
 function showError(message) { $("error").replaceChildren(message ? longText(message) : ""); }
 
+// One place builds an HTTP error, keeping its status and detail; the two conversation 409s read as sentences.
+function httpError(status, detail) {
+  const text = typeof detail === "string" ? detail : JSON.stringify(detail);
+  const message = status === 409 && text.includes("conversation is full") ? text + " Use the New conversation button."
+    : status === 409 && text.includes("conversation is busy") ? text : `${status}: ${text}`;
+  const err = new Error(message);
+  err.status = status; err.detail = text;
+  return err;
+}
+
 // Start over: the next question carries no id; a running ask is cancelled and its late result is ignored.
 function resetConversation() {
   epoch++;
@@ -167,9 +177,17 @@ function resetConversation() {
 }
 
 // The content route; the conversation id goes only to it.
-function askContent(question, ids, signal, onText, onNote) {
+async function askContent(question, ids, signal, onText, onNote) {
   const body = { question, doc_ids: ids, config: $("config").value };
   if (conversationId) body.conversation_id = conversationId;
+  const sent = body.conversation_id;
+  try { return await streamAsk("/v1/ask/stream", body, onText, signal); }
+  catch (err) { if (!(sent && err.status === 404 && err.detail === CONV_GONE)) throw err; }
+  // The server no longer knows the id, so the page starts again, once; a 404 arrives before any SSE byte,
+  // so nothing was stored or generated. The resend carries no id, so it cannot come back here.
+  conversationId = null;
+  onNote("Started a new conversation (the previous one is no longer available).");
+  delete body.conversation_id;
   return streamAsk("/v1/ask/stream", body, onText, signal);
 }
 
@@ -263,7 +281,7 @@ async function streamAsk(path, body, onText, signal) {
   if (!res.ok) {  // a problem found before streaming starts is an ordinary HTTP error
     let detail = res.statusText;
     try { detail = (await res.json()).detail || detail; } catch (_) {}
-    throw new Error(`${res.status}: ${typeof detail === "string" ? detail : JSON.stringify(detail)}`);
+    throw httpError(res.status, detail);
   }
   const reader = res.body.getReader(), decoder = new TextDecoder();
   let buffer = "", final = null;
@@ -322,10 +340,11 @@ $("ask").onsubmit = async (e) => {
       answers[r.query_id] = r;
       // the checked answer replaces what was streamed (they are the same unless the final check failed)
       msg.replaceChildren(r.answer || "");
+      if (r.kind === "clarify") msg.prepend(el("small", { class: "meta" }, "clarifying question"), el("br"));
       if (r.replace) msg.prepend(el("span", { class: "tag bad" }, "replaced after the final check"), el("br"));
       if (r.blocked.length) msg.prepend(el("span", { class: "tag bad" }, "withheld: " + r.blocked.join(", ")), el("br"));
       if (r.abstained) msg.prepend(el("span", { class: "tag warn" }, "abstained"), el("br"));
-      msg.onclick = () => { document.querySelectorAll(".a").forEach((n) => n.classList.remove("sel")); msg.classList.add("sel"); r.profiles ? detailAbout(r) : detail(r); };
+      msg.onclick = () => { document.querySelectorAll(".a").forEach((n) => n.classList.remove("sel")); msg.classList.add("sel"); r.kind === "clarify" ? detailClarify() : r.profiles ? detailAbout(r) : detail(r); };
       msg.click(); msg.scrollIntoView();
     }
   } catch (err) {
@@ -349,6 +368,11 @@ function detailAbout(r) {
     part.append(el("div", { class: "meta" }, `Opening excerpt (page ${p.opening_page})`), el("pre", {}, p.opening || "(none)"));
     box.append(part);
   }
+}
+
+// A clarification has no passages or stages to show.
+function detailClarify() {
+  $("detail").replaceChildren(el("div", { class: "meta" }, "A clarifying question: no passages were retrieved for it."));
 }
 
 function detail(r) {
