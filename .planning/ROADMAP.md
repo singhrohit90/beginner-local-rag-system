@@ -20,7 +20,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [x] **Phase 2: Conversation store and memory in the answer prompt** - Owner-scoped, deletable server-side history that the answer prompt uses, rewrite off (completed 2026-10-25)
 - [x] **Phase 3: Rewrite, clarify and topic switch** - Standalone-question rewrite before retrieval, one clarifying question, clean history on a topic switch, behind a default-off switch (completed 2026-10-25)
 - [x] **Phase 4: Multi-turn evaluation and the default decision** - Multi-turn golden set and an on/off/oracle experiment that sets the rewrite default (completed 2026-10-26)
-- [ ] **Phase 5: Chat page and honest docs** - Page keeps and resets the conversation, shows clarifying questions, and the docs describe only what was built and measured
+- [x] **Phase 5: Chat page and honest docs** - Page keeps and resets the conversation, shows clarifying questions, and the docs describe only what was built and measured (completed 2026-10-26)
 
 ## Phase Details
 
@@ -201,19 +201,19 @@ Scope note (not a criterion): golden-item authoring starts during Phase 3 on pur
   3. A clarifying question appears in the chat log as an ordinary assistant turn, rendered with `textContent` (a clarification containing markup shows as literal text, not as HTML).
   4. `rag/README.md` has a Step 11 for chat memory; `docs/backlog.md` marks chat memory done and adds compaction and conversation retention; `interview/05_conversation_memory_and_cost.md` is relabelled from "designed" to "built" only for what was built and measured, with the recorded numbers, and anything unbuilt keeps its "designed" label.
 
-**Plans:** 5 plans
+**Plans:** 5/5 plans complete
 
 Plans:
 **Wave 1**
-- [ ] 05-01-PLAN.md — rag/api/static/index.html: conversation id kept and sent, New conversation, six reset sites, stale-id resend, readable 409s, abort and epoch guard, clarify as text; the contradicted select test rewritten in the same commit (wave 1)
+- [x] 05-01-PLAN.md — rag/api/static/index.html: conversation id kept and sent, New conversation, six reset sites, stale-id resend, readable 409s, abort and epoch guard, clarify as text; the contradicted select test rewritten in the same commit (wave 1)
 
 **Wave 2** *(blocked on Wave 1 completion)*
-- [ ] 05-02-PLAN.md — tests/page_harness.js and tests/test_page_conversation.py: node behaviour harness (8 scenarios) and static contract tests, fail-first at P5_BASE (wave 2)
-- [ ] 05-03-PLAN.md — rag/README.md Step 11 (numbers copied from docs/chat_memory_eval.md) and docs/backlog.md: chat memory done, compaction, retention, stale rewriting line split (wave 2)
-- [ ] 05-04-PLAN.md — interview/05_conversation_memory_and_cost.md relabelled Built only where built and measured; interview/README.md index row (wave 2)
+- [x] 05-02-PLAN.md — tests/page_harness.js and tests/test_page_conversation.py: node behaviour harness (8 scenarios) and static contract tests, fail-first at P5_BASE (wave 2)
+- [x] 05-03-PLAN.md — rag/README.md Step 11 (numbers copied from docs/chat_memory_eval.md) and docs/backlog.md: chat memory done, compaction, retention, stale rewriting line split (wave 2)
+- [x] 05-04-PLAN.md — interview/05_conversation_memory_and_cost.md relabelled Built only where built and measured; interview/README.md index row (wave 2)
 
 **Wave 3** *(blocked on Wave 2 completion)*
-- [ ] 05-05-PLAN.md — Phase gate: full suite and count, retrieval invariant, prompt fingerprint, prohibition diff against P5_BASE, docs agreement; human_needed browser checklist; STATE.md record (wave 3)
+- [x] 05-05-PLAN.md — Phase gate: full suite and count, retrieval invariant, prompt fingerprint, prohibition diff against P5_BASE, docs agreement; human_needed browser checklist; STATE.md record (wave 3)
 
 **UI hint**: yes
 
@@ -256,4 +256,4 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5
 | 2. Conversation store and memory in the answer prompt | 9/9 | Complete    | 2026-10-25 |
 | 3. Rewrite, clarify and topic switch | 8/8 | Complete    | 2026-10-25 |
 | 4. Multi-turn evaluation and the default decision | 10/10 | Complete    | 2026-10-26 |
-| 5. Chat page and honest docs | 0/TBD | Not started | - |
+| 5. Chat page and honest docs | 5/5 | Complete    | 2026-10-26 |

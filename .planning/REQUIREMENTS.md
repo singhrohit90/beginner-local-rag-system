@@ -38,12 +38,12 @@ Requirements for the chat-memory milestone. Each maps to roadmap phases.
 
 ### Chat page (R9)
 
-- [ ] **PAGE-01** (R9): `rag/api/static/index.html` keeps the conversation id across questions, resets it on "new conversation" or a change of selected documents, and handles a stale id (404) by starting a new conversation
-- [ ] **PAGE-02** (R9): The clarifying question (RWR-03) is shown as an ordinary assistant turn, rendered with `textContent`
+- [x] **PAGE-01** (R9): `rag/api/static/index.html` keeps the conversation id across questions, resets it on "new conversation" or a change of selected documents, and handles a stale id (404) by starting a new conversation
+- [x] **PAGE-02** (R9): The clarifying question (RWR-03) is shown as an ordinary assistant turn, rendered with `textContent`
 
 ### Docs and notes (R10)
 
-- [ ] **DOCS-01** (R10): `rag/README.md` gains a Step 11 for chat memory; `docs/backlog.md` marks the item done and adds compaction and conversation retention; `interview/05_conversation_memory_and_cost.md` is relabelled from "designed" to "built" only for what is built and measured, with the recorded numbers
+- [x] **DOCS-01** (R10): `rag/README.md` gains a Step 11 for chat memory; `docs/backlog.md` marks the item done and adds compaction and conversation retention; `interview/05_conversation_memory_and_cost.md` is relabelled from "designed" to "built" only for what is built and measured, with the recorded numbers
 
 ## v2 Requirements
 
@@ -113,9 +113,9 @@ Which phases cover which requirements. Updated during roadmap creation.
 | EVAL-01 | Phase 4 | Complete |
 | EVAL-02 | Phase 4 | Complete |
 | EVAL-03 | Phase 4 | Complete |
-| PAGE-01 | Phase 5 | Pending |
-| PAGE-02 | Phase 5 | Pending |
-| DOCS-01 | Phase 5 | Pending |
+| PAGE-01 | Phase 5 | Complete |
+| PAGE-02 | Phase 5 | Complete |
+| DOCS-01 | Phase 5 | Complete |
 
 **Coverage:**
 - v1 requirements: 18 total
