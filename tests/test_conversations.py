@@ -4,7 +4,10 @@ prompts with and without history, and the no-disk-cache rule; plan 02-08 adds th
 concurrency and cap tests below them."""
 
 import ast
+import gc
 import json
+import re
+import threading
 from datetime import datetime
 from pathlib import Path
 
@@ -15,12 +18,15 @@ from rag.api.conversations import ConversationStore, new_turn, owner_key, to_his
 from rag.api.main import create_app, current_owner
 from rag.api.service import DocumentService
 from rag.common.embed import HashingEmbedder
-from rag.common.llm import FakeLLM
+from rag.common.llm import FakeLLM, LLMResult, StreamPiece
+from rag.common.types import Hit
 from rag.common.trace import load_trace
 from rag.query.generate import build_prompts
 from rag.query.guard import BLOCKED
-from rag.query.history import HISTORY_HEADER, HISTORY_WINDOW_TURNS, render_block, window
+from rag.query.history import (HISTORY_HEADER, HISTORY_WINDOW_TURNS, HistoryTurn, estimate_prompt_tokens,
+                               fits_context, render_block, window)
 from tests.test_api import COMPACTION, REPLICATION, make_pdf
+from tests.test_stream_api import frames
 
 PARTITIONING = "Partitioning splits a large dataset across nodes by key range or by a hash of the key. " * 6
 
@@ -269,3 +275,251 @@ def test_no_get_llm_call_in_rag_api_omits_cache_dir_none():
             assert cache and isinstance(cache[0].value, ast.Constant) and cache[0].value.value is None, (
                 f"{path.name}:{node.lineno} calls get_llm without cache_dir=None")
     assert found
+
+
+class GatedLLM(FakeLLM):
+    """A fake model that blocks inside the model call until the test releases it, so the test decides
+    what overlaps the turn. Every wait has a 30-second ceiling; nothing sleeps."""
+
+    def __init__(self, reply="Copies live on several nodes [S1]."):
+        super().__init__(lambda system, user: reply)
+        self.reply = reply
+        self.prompts = []
+        self.started = threading.Event()
+        self.release = threading.Event()
+
+    def generate(self, system, user, *args, **kwargs):
+        self.prompts.append((system, user))
+        self.started.set()
+        assert self.release.wait(30)
+        return LLMResult(text=self.reply)
+
+    def generate_stream(self, system, user, *args, **kwargs):
+        self.prompts.append((system, user))
+        self.started.set()
+        assert self.release.wait(30)
+        yield StreamPiece(text=self.reply)
+        yield StreamPiece(result=LLMResult(text=self.reply))
+
+
+@pytest.mark.parametrize("streamed", [False, True], ids=["ordinary", "streamed"])
+@pytest.mark.parametrize("scope", ["one document", "all documents"])
+def test_a_delete_during_a_turn_leaves_no_conversation_file(tmp_path, scope, streamed):
+    service = make_service(tmp_path)
+    doc_id = add_document(service, REPLICATION)
+    doc_ids = [doc_id] if scope == "one document" else None
+    gated = GatedLLM()
+    service.llm = gated
+    outcome = []
+
+    def ask():
+        if streamed:
+            events = list(service.ask_documents_stream("local", doc_ids, "What does replication do?"))
+            outcome.append(events[-1]["data"])
+        else:
+            outcome.append(service.ask_documents("local", doc_ids, "What does replication do?"))
+
+    asker = threading.Thread(target=ask)
+    asker.start()
+    try:
+        assert gated.started.wait(30)  # past retrieval, inside the model call
+        service.delete(doc_id, "local")  # synchronous: finished before the writer runs
+    finally:
+        gated.release.set()
+    asker.join(30)
+    assert not asker.is_alive()
+    assert len(outcome) == 1 and re.fullmatch(r"[0-9a-f]{32}", outcome[0]["conversation_id"])  # still answered
+    assert not (service.root / doc_id).exists()
+    assert [p for p in service.root.rglob("*") if p.is_file()] == []
+    assert service.conversations.dropped_writes == 1
+
+
+def test_delete_is_serialised_with_a_conversation_write(tmp_path, monkeypatch):
+    service = make_service(tmp_path)
+    a = add_document(service, REPLICATION)
+    b = add_document(service, COMPACTION, name="b.pdf")
+    store = service.conversations
+    conv = store.open("local", [a, b], None)
+    entered, release = threading.Event(), threading.Event()
+    original = store._atomic_write
+
+    def held(path, text):
+        entered.set()
+        assert release.wait(30)
+        original(path, text)
+
+    monkeypatch.setattr(store, "_atomic_write", held)
+    writer = threading.Thread(target=lambda: store.append_turn(conv, new_turn("q", "a", [a, b], "id-1"),
+                                                               service._alive))
+    deleter = threading.Thread(target=lambda: service.delete(a, "local"))
+    writer.start()
+    try:
+        assert entered.wait(30)  # the writer holds the store lock inside the write
+        deleter.start()
+        # The delete waits for the store lock; on correct code it cannot have finished, and this bounded
+        # join only affects how strongly the old code is caught, never whether correct code passes.
+        deleter.join(0.5)
+        assert deleter.is_alive()
+        # purge_document takes the store lock by itself, so the folder removal is the step only the delete's
+        # own `with store.lock:` holds back: the document folder must still be there while the write is held.
+        assert (service.root / a).is_dir()
+    finally:
+        release.set()
+    writer.join(30)
+    deleter.join(30)
+    assert not writer.is_alive() and not deleter.is_alive()
+    assert not list((service.root / "_conversations").rglob("*.json"))  # the finished write was purged
+    assert not (service.root / a).exists()
+
+
+@pytest.mark.parametrize("streamed", [False, True], ids=["ordinary", "streamed"])
+def test_a_second_request_on_a_busy_conversation_gets_409(tmp_path, streamed):
+    service = make_service(tmp_path)
+    doc_id = add_document(service, REPLICATION)
+    client = client_for(service)
+    ask = f"/v1/documents/{doc_id}/ask"
+    cid = client.post(ask, json={"question": "q1"}).json()["conversation_id"]
+    gated = GatedLLM()
+    service.llm = gated
+    url = ask + "/stream" if streamed else ask
+    responses = []
+    first = threading.Thread(target=lambda: responses.append(
+        client.post(url, json={"question": "q2", "conversation_id": cid})))
+    first.start()
+    try:
+        assert gated.started.wait(30)
+        busy = client.post(url, json={"question": "q3", "conversation_id": cid})
+        assert busy.status_code == 409
+        assert busy.json() == {"detail": "conversation is busy, retry when the previous answer is finished"}
+        assert not busy.headers["content-type"].startswith("text/event-stream")
+        assert len(gated.prompts) == 1  # the busy request never reached the model
+    finally:
+        gated.release.set()
+    first.join(30)
+    assert not first.is_alive()
+    assert responses[0].status_code == 200
+    path = conversation_file(service, "local", [doc_id], cid)
+    assert [t["question"] for t in stored(path)["turns"]] == ["q1", "q2"]
+    after = client.post(ask, json={"question": "q4", "conversation_id": cid})
+    assert after.status_code == 200 and after.json()["turn"] == 3
+
+
+def test_closing_the_stream_frees_the_conversation_and_stores_nothing(tmp_path):
+    service = make_service(tmp_path, llm=FakeLLM(lambda s, u: "word " * 400))
+    doc_id = add_document(service, REPLICATION)
+    cid = service.ask_documents("local", [doc_id], "q1")["conversation_id"]
+    events = service.ask_documents_stream("local", [doc_id], "q2", conversation_id=cid)
+    assert next(events)["event"] == "token"
+    events.close()
+    path = conversation_file(service, "local", [doc_id], cid)
+    assert [t["question"] for t in stored(path)["turns"]] == ["q1"]
+    service.ask_documents("local", [doc_id], "q3", conversation_id=cid)  # not busy
+    assert [t["question"] for t in stored(path)["turns"]] == ["q1", "q3"]
+
+
+def test_a_failed_turn_is_not_stored_and_frees_the_conversation(tmp_path):
+    service = make_service(tmp_path)
+    doc_id = add_document(service, REPLICATION)
+    client = client_for(service)
+    ask = f"/v1/documents/{doc_id}/ask"
+    cid = client.post(ask, json={"question": "q1"}).json()["conversation_id"]
+    healthy = service.llm
+
+    def broken(system, user):
+        raise ConnectionError("cannot reach the model server")
+
+    service.llm = FakeLLM(broken)
+    assert client.post(ask, json={"question": "q2", "conversation_id": cid}).status_code == 502
+    streamed = client.post(ask + "/stream", json={"question": "q3", "conversation_id": cid})
+    assert streamed.status_code == 200
+    assert [name for name, _ in frames(streamed)] == ["error"]
+    path = conversation_file(service, "local", [doc_id], cid)
+    assert [t["question"] for t in stored(path)["turns"]] == ["q1"]
+    service.llm = healthy
+    after = client.post(ask, json={"question": "q4", "conversation_id": cid})
+    assert after.status_code == 200 and after.json()["turn"] == 2
+
+
+def test_an_unstarted_stream_frees_the_conversation_when_dropped(tmp_path):
+    service = make_service(tmp_path)
+    doc_id = add_document(service, REPLICATION)
+    cid = service.ask_documents("local", [doc_id], "q1")["conversation_id"]
+    events = service.ask_documents_stream("local", [doc_id], "q2", conversation_id=cid)
+    del events  # never started, so its finally never runs; the finalizer must free the conversation
+    gc.collect()
+    assert service.ask_documents("local", [doc_id], "q3", conversation_id=cid)["turn"] == 2
+
+
+FULL = {"detail": "this conversation is full; start a new conversation"}
+
+
+def test_a_full_conversation_is_refused_before_any_model_call_or_sse_byte(tmp_path):
+    llm, seen = recording()
+    service = make_service(tmp_path, llm=llm)
+    doc_id = add_document(service, REPLICATION)
+    client = client_for(service)
+    service.conversations.max_turns = 2
+    ask = f"/v1/documents/{doc_id}/ask"
+    first = client.post(ask, json={"question": "q1"})
+    assert first.status_code == 200
+    cid = first.json()["conversation_id"]
+    assert client.post(ask, json={"question": "q2", "conversation_id": cid}).status_code == 200  # one stored: room
+    calls = len(seen)
+    full = client.post(ask, json={"question": "q3", "conversation_id": cid})  # two stored: full
+    assert full.status_code == 409 and full.json() == FULL
+    streamed = client.post(ask + "/stream", json={"question": "q3", "conversation_id": cid})
+    assert streamed.status_code == 409 and streamed.json() == FULL
+    assert not streamed.headers["content-type"].startswith("text/event-stream")
+    assert len(seen) == calls  # refused before any model call
+    fresh = client.post(ask, json={"question": "q4"})
+    assert fresh.status_code == 200 and fresh.json()["turn"] == 1
+
+
+def test_the_stored_word_cap_refuses_the_next_turn(tmp_path):
+    service = make_service(tmp_path)
+    doc_id = add_document(service, REPLICATION)
+    client = client_for(service)
+    service.conversations.max_words = 50
+    under = seed_turns(service, "local", [doc_id], [doc_id], [(" ".join(["q"] * 24), " ".join(["a"] * 25))])  # 49
+    at_cap = seed_turns(service, "local", [doc_id], [doc_id], [(" ".join(["q"] * 25), " ".join(["a"] * 25))])  # 50
+    ask = f"/v1/documents/{doc_id}/ask"
+    assert client.post(ask, json={"question": "next", "conversation_id": under}).status_code == 200
+    refused = client.post(ask, json={"question": "next", "conversation_id": at_cap})
+    assert refused.status_code == 409 and refused.json() == FULL
+
+
+def test_an_oversized_follow_up_is_refused_but_a_first_turn_is_not(tmp_path, monkeypatch):
+    llm, seen = recording()
+    service = make_service(tmp_path, llm=llm)
+    doc_id = add_document(service, REPLICATION)
+    client = client_for(service)
+    monkeypatch.setattr("rag.query.history.MODEL_CONTEXT_TOKENS", 3700)  # below any real prompt plus 3600
+    ask = f"/v1/documents/{doc_id}/ask"
+    first = client.post(ask, json={"question": "How does replication survive a node failure?"})
+    assert first.status_code == 200  # a first turn is never budget-checked, exactly as today
+    cid = first.json()["conversation_id"]
+    calls = len(seen)
+    follow_up = {"question": "And how many copies does it keep?", "conversation_id": cid}
+    refused = client.post(ask, json=follow_up)
+    assert refused.status_code == 409 and refused.json() == FULL
+    streamed = client.post(ask + "/stream", json=follow_up)
+    assert streamed.status_code == 409 and streamed.json() == FULL
+    assert not streamed.headers["content-type"].startswith("text/event-stream")
+    assert len(seen) == calls
+
+
+def test_worst_case_prompt_plus_3600_fits_the_recorded_context_window(monkeypatch):
+    turns = [HistoryTurn(" ".join([f"q{i}"] * 80), " ".join([f"a{i}"] * 80), "2026-10-22T09:30:00+00:00")
+             for i in range(7)]
+    block = render_block(window(turns, HISTORY_WINDOW_TURNS))
+    hits = [Hit(f"w{i}", i, 1.0, 100 + i, 100 + i, " ".join(["data"] * 300)) for i in range(1, 6)]  # 1500 words
+    question = ("data " * 400).strip()
+    assert len(question) == 1999  # the API limit is 2000
+    for style in ("standard", "spotlight"):
+        system, user = build_prompts(question, hits, style, "document", history_block=block)
+        assert block in user
+        assert fits_context(system, user), (style, estimate_prompt_tokens(system, user))
+    monkeypatch.setattr("rag.query.history.MODEL_CONTEXT_TOKENS", 8192)  # the floor
+    pathological = ("a " * 1000).strip()  # 1999 characters of one-letter words
+    assert len(pathological) == 1999
+    assert not fits_context(*build_prompts(pathological, hits, "spotlight", "document", history_block=block))
