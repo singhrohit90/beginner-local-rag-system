@@ -108,6 +108,7 @@ class DocumentService:
         self._create_lock = threading.Lock()  # two identical uploads at once must not both pass the duplicate check
         self._running: Set[str] = set()  # documents being ingested right now
         self._deleting: Set[str] = set()  # documents deleted while an ingestion was still running
+        self._deleted: Set[str] = set()  # every id deleted since start; ids are random, so never reused
         self.store: ChunkStore = store or MemoryChunkStore()  # a vector database plugs in here
         # conversation files live under this root (D-01); a test may pass its own store on the same root
         self.conversations = conversations or ConversationStore(self.root)
@@ -130,9 +131,11 @@ class DocumentService:
 
     def _alive(self, doc_ids: Sequence[str]) -> bool:
         """The conversation writer's check: True only while every document still exists and is not
-        being deleted."""
+        being deleted. A deleted id stays dead even if rmtree left its folder behind (Windows)."""
         try:
             for doc_id in doc_ids:
+                if doc_id in self._deleted:
+                    return False
                 self._dir(doc_id)
         except NotFound:
             return False
@@ -391,6 +394,7 @@ class DocumentService:
         # finds the id in _deleting and is refused.
         with self._load_lock:
             self._deleting.add(doc_id)
+            self._deleted.add(doc_id)  # a tombstone for _alive; _deleting is discarded at the end
             self.store.delete_document(doc_id)
         # A conversation writer holds the same lock while it checks the documents are alive and writes, so
         # a write either lands before the folder goes (and goes with it, or is purged) or starts after it

@@ -317,8 +317,8 @@ class ConversationStore:
             try:
                 self._make_folders(conversation)
                 self._atomic_write(conversation.path, json.dumps(data, indent=1))
-            except FileNotFoundError:
-                return self._drop()
+            except OSError:  # a folder a delete removed, a file still held after the retry, a full disk
+                return self._drop()  # best effort (D-09): the answer was already generated, so never fail it
             return True
 
     # ---- caps and the delete cascade ----------------------------------------------------
