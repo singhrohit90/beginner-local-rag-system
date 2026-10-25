@@ -649,11 +649,12 @@ def test_a_long_model_error_is_not_cut_in_the_middle_of_a_sentence(tmp_path):
     assert detail.endswith(" ...") and len(detail) < 4100
 
 
-def test_choosing_another_document_keeps_the_conversation_on_the_page(tmp_path):
+def test_choosing_another_document_resets_the_conversation_only_under_scope_one(tmp_path):
     client, _ = make_client(tmp_path)
     page = client.get("/").text
     select_function = page[page.index("function select("):page.index("function scopeLabel")]
-    assert "replaceChildren" not in select_function  # the log is not cleared when the selection changes
+    assert "resetConversation(" in select_function and '$("scope").value === "one"' in select_function
+    assert "replaceChildren" not in select_function  # the log is cleared only through resetConversation, defined above
     assert "asked of:" in page and "no answer" in page
 
 
