@@ -52,6 +52,11 @@ TURN_KEYS = ("question", "answer")
 MIN_CLARIFY_CANDIDATES = 2  # a clarify row names at least two earlier candidates
 
 
+def normalise(text: str) -> str:
+    """Lower-case, collapse whitespace, and drop trailing ?, . and ! for equality checks."""
+    return re.sub(r"\s+", " ", text.lower()).strip().rstrip("?.! ")
+
+
 @dataclass(frozen=True)
 class GoldTurn:
     question: str
@@ -75,6 +80,12 @@ class GoldConversation:
     source_id: Optional[str] = None
     notes: str = ""
 
+    @property
+    def expects_rewrite(self) -> bool:
+        if self.expect == "clarify":
+            return True
+        return normalise(self.standalone or "") != normalise(self.message)
+
     def validate(self) -> None:
         if not self.id:
             raise ValueError("empty id")
@@ -91,6 +102,49 @@ class GoldConversation:
         for start, end in self.gold_pages:
             if start < 1 or end < start:
                 raise ValueError(f"{self.id}: bad page range {(start, end)}")
+        for n, turn in enumerate(self.turns, start=1):
+            if len(turn.question.split()) > HISTORY_QUESTION_MAX_WORDS:
+                raise ValueError(f"{self.id}: turn {n} question over HISTORY_QUESTION_MAX_WORDS words")
+            if len(turn.answer.split()) > HISTORY_ANSWER_MAX_WORDS:
+                raise ValueError(f"{self.id}: turn {n} answer over HISTORY_ANSWER_MAX_WORDS words")
+        if (self.expect == "clarify") != (self.category == "ambiguous_follow_up"):
+            raise ValueError(f"{self.id}: expect clarify if and only if category ambiguous_follow_up")
+        if self.expect == "clarify":
+            if self.standalone is not None:
+                raise ValueError(f"{self.id}: a clarify row has a null standalone")
+            if self.gold_pages or self.key_facts or self.evidence_terms:
+                raise ValueError(f"{self.id}: a clarify row has no gold_pages, key_facts or evidence_terms")
+            if len(self.must_contain) < MIN_CLARIFY_CANDIDATES:
+                raise ValueError(f"{self.id}: a clarify row needs MIN_CLARIFY_CANDIDATES must_contain terms")
+            history = " ".join(t.question + " " + t.answer for t in self.turns).lower()
+            if any(term.lower() not in history for term in self.must_contain):
+                raise ValueError(f"{self.id}: every clarify candidate must appear in the turns")
+        else:
+            if not isinstance(self.standalone, str) or not self.standalone.strip():
+                raise ValueError(f"{self.id}: an answer row needs a standalone question")
+            if not self.gold_pages:
+                raise ValueError(f"{self.id}: an answer row needs gold_pages")
+            if not self.key_facts:
+                raise ValueError(f"{self.id}: an answer row needs key_facts")
+            if not self.evidence_terms:
+                raise ValueError(f"{self.id}: an answer row needs evidence_terms")
+            same = normalise(self.standalone) == normalise(self.message)
+            if self.category in ("topic_switch", "standalone_in_conversation") and not same:
+                raise ValueError(f"{self.id}: standalone must equal message in category {self.category}")
+            if self.category in ("pronoun_follow_up", "constraint_follow_up") and same:
+                raise ValueError(f"{self.id}: standalone must differ from message in category {self.category}")
+            standalone = self.standalone.lower()
+            if self.category == "topic_switch":
+                if not self.must_not_contain:
+                    raise ValueError(f"{self.id}: a topic_switch row needs must_not_contain")
+                if any(term.lower() in standalone for term in self.must_not_contain):
+                    raise ValueError(f"{self.id}: a must_not_contain term occurs in the standalone")
+            if self.category == "constraint_follow_up":
+                if not self.must_contain:
+                    raise ValueError(f"{self.id}: a constraint_follow_up row needs must_contain")
+                message = self.message.lower()
+                if any(t.lower() not in message or t.lower() not in standalone for t in self.must_contain):
+                    raise ValueError(f"{self.id}: every must_contain term must be in message and standalone")
 
     def to_question(self) -> GoldQuestion:
         return GoldQuestion(
