@@ -375,4 +375,6 @@ The results are provisional: 34 of 34 items are pending human review, and the nu
 item is approved and the run is repeated. Decision: ships off (failed: a, c, f; provisional: items pending human
 review)
 
+Over-rewriting: with one unrelated earlier turn in front of the 37 single-turn questions (reported, not gating), qwen rewrote 16 of them in the phase gate run (17 in the run the eval file records) and hit@5 changed on 6 of 37 (`.planning/phases/04-multi-turn-evaluation-and-the-default-decision/04-10-SUMMARY.md`). It is not part of the shipping rule.
+
 The rule, the full tables and the command are in `docs/chat_memory_eval.md`.
