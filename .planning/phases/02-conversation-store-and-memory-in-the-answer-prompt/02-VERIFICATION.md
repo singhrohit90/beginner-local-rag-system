@@ -1,7 +1,7 @@
 ---
 phase: 02-conversation-store-and-memory-in-the-answer-prompt
 verified: 2026-10-25T14:00:00Z
-status: human_needed
+status: passed
 score: 5/5 must-haves verified
 covered_files:
   - .planning/phases/02-conversation-store-and-memory-in-the-answer-prompt/02-01-PLAN.md
@@ -192,3 +192,11 @@ Conversation files are kept when `keep_traces` is off, because history is functi
 
 `python -m rag.common.llm_check` belongs to the flow verification gate (it needs the tunnel) and was not run by this plan; the tunnel forward was resetting (WinError 10054) on 2026-10-25, and `max_model_len` stays parked for the merge gate with `MODEL_CONTEXT_TOKENS` at the 8192 floor.
 
+
+## Lead resolution of the human items (2026-10-25)
+
+Status set from `human_needed` to `passed` by the flow lead; 5/5 must-haves were verified and no gaps were found.
+
+1. max_model_len: DEFERRED by the owner in chat on 2026-10-25 (same decision as phase 1). The 8192 floor stays; re-read before the merge gate (STATE.md, Parked).
+2. D-11 retention (answer text kept for every page question until phase 5 adds the page's conversation_id): PARKED until phase 5 by the lead. Nothing ships before the merge gate after phase 5, so no build with this behaviour reaches use; the merge gate lists it for the owner.
+3. Judgment-tier prohibitions: CHECKED by the lead on `git diff 346cd43`: no `time.sleep` added in tests; new log lines carry only reasons and counts (no question, answer, owner or conversation id); the only new `while True` is a 2-second deadline retry around file reads for Windows sharing errors (copied from service.py), not a probe retry; no `.env` read; no hook-flagged file named in committed scripts.

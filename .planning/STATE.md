@@ -97,6 +97,9 @@ From the approval brief (gate 1, 2026-10-24); see `.planning/runs/20261021-1840-
 
 - max_model_len -- **Park until step: merge gate**: re-read with the command in docs/models.md once the tunnel forward works (2026-10-25: listener up, forward resets with WinError 10054); replace the 8192 floor in docs/models.md and MODEL_CONTEXT_TOKENS; owner deferred it in chat.
 
+- D-11 retention (phase 2 keeps answer text for every page question until phase 5 adds the page conversation_id) -- **Park until step: phase 5**; listed at the merge gate.
+- Flaky test tests/test_api.py::test_a_delete_during_a_load_leaves_nothing_in_the_store[one document] -- **Park until it hurts**: failed once under load in a worktree, passed every rerun; unparked when it fails in a gate run.
+
 ## Deferred Items
 
 Items acknowledged and deferred at milestone close, most recent first:
