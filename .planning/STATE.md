@@ -68,18 +68,19 @@ Recent decisions affecting current work:
 
 Open decisions (not settled; do not pick a side outside discuss-phase). Detail in ROADMAP.md "Open Decisions" and `.planning/research/SUMMARY.md`:
 
-- D1 Cross-document conversation storage: per-owner folder with delete cascade, or refuse history for cross-document scope. Resolve in discuss-phase for Phase 2.
+- D1 resolved in Phase 2 (D-01): cross-document conversations are stored under `data/uploads/_conversations/{owner_key}/` and removed when any document in their scope is deleted.
 - D2 Rewrite-failure policy: fail-open with a visible flag, or fail-closed with an HTTP status. Resolve in discuss-phase for Phase 3.
-- D3 Cap and window numbers: raise in Phase 1 (constants), pin in Phase 2 after `max_model_len` is recorded.
+- D3 pinned in Phase 2 (D-15): window 6 turns, block 400 words, answers 40 and questions 60 words, 50 turns and 20000 stored words per conversation, `MODEL_CONTEXT_TOKENS` from `docs/models.md`.
 - Smaller points: conversation file format (JSONL or atomic JSON), concurrent-request policy (409 or write-only lock), `keep_traces` gating of conversation files, rewriter model and setting name, question slot in the answer prompt (Phase 4), reload-resume GET (v2).
 
 ### Blockers/Concerns
 
 - [Phase 2, 2026-10-25]: max_model_len not read on 2026-10-25 (`ConnectionResetError: [WinError 10054]`, the tunnel forward resets; owner deferred the re-read to the merge gate); `MODEL_CONTEXT_TOKENS` stays at the 8192 floor for Phase 2; re-read it with the command in `docs/models.md` (Context window) before raising any history cap.
-- [Phase 2]: Existing test `test_the_streamed_response_equals_the_ordinary_one` must ignore `conversation_id`; the new conversation subfolder must not change `chat/*.json` trace-count assertions.
+- [Phase 2, done 2026-10-25]: `test_the_streamed_response_equals_the_ordinary_one` needed no edit (it compares a fixed key tuple; RESEARCH Pitfall 10 superseded D-06's clause); separate ids are pinned by `test_questions_without_an_id_start_separate_conversations`; conversation files live in `chat/conversations/` or `_conversations/`, and every `chat/*.json` trace-count test passed unchanged.
+- [Phase 2, owner flag]: conversation files are kept when `keep_traces` is off (D-11: history is functional state); they live until a document in their scope is deleted; until Phase 5 the page sends no `conversation_id`, so every page question writes an orphan one-turn conversation file, including all-documents answers that no trace keeps today; a retention period is not built yet (Phase 5 docs and backlog); the budget refusal reuses the full-conversation 409 (D-16), wording left for Phase 5.
 - [Phase 3]: Rewriter behaviour is unmeasured (constraint dropping, parse failures, Ollama context size and silent truncation); the provider module is hook-flagged, so test with a spy instead of reading it.
 - [Phase 4]: Golden-set power is low (one question is 2.7 points; a 12-16 turn set cannot clear an 8-point band); rewriter and judge are both `qwen2.5:7b`, so re-score a borderline result with another judge.
-- Standing constraints: pytest baseline after Phase 1 is 702 passed, 2 skipped (704 collected; OpenSearch up on 2026-10-25); before Phase 1 it was 591 passed, 2 skipped (593 collected); retrieval invariant hit@5 0.865, mrr 0.663, unchanged after the Phase 1 seam.
+- Standing constraints: pytest baseline after Phase 2 is 741 passed, 2 skipped (743 collected; OpenSearch up on 2026-10-25); after Phase 1 it was 702 passed, 2 skipped (704 collected; OpenSearch up on 2026-10-25); before Phase 1 it was 591 passed, 2 skipped (593 collected); retrieval invariant hit@5 0.865, mrr 0.663, unchanged after Phase 2.
 - Standing constraints: never name `rag/common/llm.py` or `tests/test_vllm.py` in a shell command, never glob `tests/` or `rag/common/`, never read `.env`; commit messages go through `git commit -F <file>`; `SYSTEM_PROMPT` and `DOCUMENT_SYSTEM_PROMPT` stay word for word; `get_llm(..., cache_dir=None)` for every service LLM.
 
 ## Parked
