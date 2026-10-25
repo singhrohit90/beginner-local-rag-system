@@ -523,3 +523,62 @@ def test_worst_case_prompt_plus_3600_fits_the_recorded_context_window(monkeypatc
     pathological = ("a " * 1000).strip()  # 1999 characters of one-letter words
     assert len(pathological) == 1999
     assert not fits_context(*build_prompts(pathological, hits, "spotlight", "document", history_block=block))
+
+
+@pytest.mark.parametrize("streamed", [False, True], ids=["ordinary", "streamed"])
+@pytest.mark.parametrize("scope", ["one document", "all documents"])
+def test_a_folder_left_by_a_failed_delete_does_not_let_a_new_conversation_be_saved(tmp_path, monkeypatch,
+                                                                                   scope, streamed):
+    """Review I-1: on Windows rmtree can leave the folder behind; the deleted document must stay dead."""
+    service = make_service(tmp_path)
+    doc_id = add_document(service, REPLICATION)
+    add_document(service, COMPACTION, name="b.pdf")
+    doc_ids = [doc_id] if scope == "one document" else None
+    monkeypatch.setattr(service, "_remove_tree", lambda path: None)  # a locked file kept the whole folder
+    gated = GatedLLM()
+    service.llm = gated
+    outcome = []
+
+    def ask():
+        if streamed:
+            events = list(service.ask_documents_stream("local", doc_ids, "What does replication do?"))
+            outcome.append(events[-1]["data"])
+        else:
+            outcome.append(service.ask_documents("local", doc_ids, "What does replication do?"))
+
+    asker = threading.Thread(target=ask)
+    asker.start()
+    try:
+        assert gated.started.wait(30)  # a new conversation, inside the model call
+        service.delete(doc_id, "local")
+    finally:
+        gated.release.set()
+    asker.join(30)
+    assert not asker.is_alive()
+    assert len(outcome) == 1 and re.fullmatch(r"[0-9a-f]{32}", outcome[0]["conversation_id"])
+    assert (service.root / doc_id).is_dir()  # the simulated leftover
+    assert [p for p in service.root.rglob("*.json") if "conversations" in p.parts or "_conversations" in p.parts] == []
+    assert service.conversations.dropped_writes == 1
+
+
+@pytest.mark.parametrize("streamed", [False, True], ids=["ordinary", "streamed"])
+def test_a_storage_error_on_the_conversation_write_drops_the_turn_and_keeps_the_answer(tmp_path, monkeypatch,
+                                                                                       streamed):
+    """Review I-2: storage is best effort; a PermissionError or a full disk must not fail a shown answer."""
+    service = make_service(tmp_path)
+    doc_id = add_document(service, REPLICATION)
+
+    def refused(path, text):
+        raise PermissionError("the file is held by another process")
+
+    monkeypatch.setattr(service.conversations, "_atomic_write", refused)
+    if streamed:
+        events = list(service.ask_documents_stream("local", [doc_id], "What does replication do?"))
+        assert events[-1]["event"] == "final"
+        result = events[-1]["data"]
+    else:
+        result = service.ask_documents("local", [doc_id], "What does replication do?")
+    assert result["answer"] == "Copies live on several nodes [S1]."
+    assert service.conversations.dropped_writes == 1
+    again = service.ask_documents("local", [doc_id], "And again?")  # the conversation lease was freed
+    assert again["turn"] == 1
