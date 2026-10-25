@@ -11,7 +11,9 @@ from rag.api.conversations import new_turn
 from rag.common.embed import HashingEmbedder
 from rag.common.llm import FakeLLM, get_llm
 from rag.common.trace import load_trace
-from rag.query.rewrite import REWRITE_SYSTEM_PROMPT
+from rag.query.generate import build_prompts
+from rag.query.history import HISTORY_HEADER
+from rag.query.rewrite import REWRITE_SYSTEM_PROMPT, REWRITE_SYSTEM_PROMPT_NO_CLARIFY
 from tests.test_api import COMPACTION, REPLICATION
 from tests.test_conversations import (add_document, client_for, conversation_file, make_service, recording,
                                       seed_turns, stored)
@@ -386,3 +388,61 @@ def test_a_clarification_is_stored_with_its_kind(tmp_path):
                                     json={"question": "Raft, please", "conversation_id": cid})
     assert full.status_code == 409
     assert full.json() == {"detail": "this conversation is full; start a new conversation"}
+
+
+@pytest.mark.parametrize("streamed", [False, True], ids=["ordinary", "streamed"])
+def test_an_ambiguous_message_after_a_clarification_is_answered_not_clarified(tmp_path, streamed):
+    llm, asked = recording()
+    service, seen = rewrite_service(tmp_path, CLARIFY_LINE, llm=llm)  # every reply is CLARIFY
+    doc_id = add_document(service, REPLICATION)
+    cid = seed_turns(service, "local", [doc_id], [doc_id], [TWO_NAMES_TURN])
+    client = client_for(service)
+    _, second, _, _ = ask(service, client, doc_id, cid, "how does it handle failures?", streamed)
+    assert second["kind"] == "clarify"
+    _, third, _, _ = ask(service, client, doc_id, cid, "and that one?", streamed)
+    assert seen[1][0] == REWRITE_SYSTEM_PROMPT_NO_CLARIFY and "CLARIFY" not in seen[1][0]
+    assert third["kind"] == "answer"
+    assert third["rewrite"] == {"status": "fallback", "reason": "unparsed", "rewritten_question": None}
+    assert len(asked) == 1
+    _, fourth, _, _ = ask(service, client, doc_id, cid, "and how does it recover?", streamed)
+    assert seen[2][0] == REWRITE_SYSTEM_PROMPT  # an answered turn resets the rule
+    assert fourth["kind"] == "clarify"
+    turns = stored(conversation_file(service, "local", [doc_id], cid))["turns"]
+    assert [turn.get("kind", "answer") for turn in turns] == ["answer", "clarify", "answer", "clarify"]
+
+
+@pytest.mark.parametrize("streamed", [False, True], ids=["ordinary", "streamed"])
+def test_a_clarifying_question_with_a_link_falls_back(tmp_path, streamed):
+    llm, asked = recording()
+    service, seen = rewrite_service(tmp_path, "CLARIFY: See https://evil.example/x for Raft or Paxos?", llm=llm)
+    doc_id = add_document(service, REPLICATION)
+    cid = seed_turns(service, "local", [doc_id], [doc_id], [TWO_NAMES_TURN])
+    status, data, names, text = ask(service, client_for(service), doc_id, cid, "how does it handle failures?",
+                                    streamed)
+    assert status == 200 and data["kind"] == "answer"
+    assert data["rewrite"]["status"] == "fallback" and data["rewrite"]["reason"] == "flagged"
+    assert len(asked) == 1 and len(seen) == 1
+    assert "evil.example" not in text  # the raw body, every frame included
+
+
+def test_a_topic_switch_starts_a_clean_history(tmp_path):
+    llm, asked = recording()
+    service, seen = rewrite_service(tmp_path, "NEW_TOPIC: Tell me about Zookeeper in 2020", "STANDALONE", llm=llm)
+    doc_id = add_document(service, COMPACTION)
+    cid = seed_turns(service, "local", [doc_id], [doc_id], [RAFT_TURN])
+    message = "Tell me how compaction merges sorted segments"
+    second = service.ask_documents("local", [doc_id], message, conversation_id=cid)
+    assert second["rewrite"]["status"] == "new_topic"
+    trace = trace_of(service, doc_id, second)
+    assert trace.question == message  # retrieval on the raw message, whatever the model wrote
+    assert asked[0] == build_prompts(message, trace.stage("context").hits, "standard", "document")
+    assert HISTORY_HEADER not in asked[0][1] and "Zookeeper" not in asked[0][1]
+    assert trace.config["conversation"]["history_turns"] == 0
+    path = conversation_file(service, "local", [doc_id], cid)
+    assert stored(path)["turns"][1]["topic_start"] is True
+    third = service.ask_documents("local", [doc_id], "and why does it discard keys?", conversation_id=cid)
+    assert message in seen[1][1] and "Raft" not in seen[1][1]
+    assert HISTORY_HEADER in asked[1][1] and message in asked[1][1] and "Raft design" not in asked[1][1]
+    conversation = trace_of(service, doc_id, third).config["conversation"]
+    assert conversation["history_turns"] == 1 and conversation["dropped_turns"] == 1
+    assert "topic_start" not in stored(path)["turns"][2]
