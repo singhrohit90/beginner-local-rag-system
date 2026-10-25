@@ -9,6 +9,8 @@ Endpoints (the API is /v1; the page at / is only one client of it)
     GET    /v1/documents/{id}         one document's status (queued, processing, ready, failed)
     POST   /v1/documents/{id}/ask     {"question": "..."} -> answer, passages, trace stages
     POST   /v1/ask                    {"question": "...", "doc_ids": [...] or null}: several or all of your documents
+                                      The four ask routes (these two and their /stream forms) take an optional
+                                      "conversation_id" and return "conversation_id" and "turn"
     DELETE /v1/documents/{id}
     GET    /v1/health
 
@@ -38,6 +40,7 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from pydantic import BaseModel, Field
 
+from rag.api.conversations import ConversationBusy, ConversationFull, NoSuchConversation
 from rag.api.service import DEFAULT_MAX_UPLOAD_BYTES, LOCAL_OWNER, BadUpload, DocumentService, NotFound, TooLarge
 from rag.ingestion.chunk import STRATEGIES
 from rag.query.configs import CONFIGS
@@ -124,6 +127,10 @@ class AskRequest(BaseModel):
     question: str = Field(min_length=1, max_length=2000)
     config: str = "weighted"
     style: str = "standard"
+    # A server-issued id; absent or null starts a new conversation. The store checks its 32-hex shape,
+    # so every malformed id up to 512 characters gets the same 404 as an unknown one (D-04 refined for
+    # CONV-02); a longer one is a 422 from validation.
+    conversation_id: Optional[str] = Field(None, max_length=512)
 
 
 class AboutRequest(BaseModel):
@@ -321,6 +328,12 @@ def create_app(
             raise HTTPException(404, "no such document")
         except BadUpload as err:
             raise HTTPException(409, str(err))
+        except NoSuchConversation:  # unknown, malformed, another owner's or another scope's: one answer
+            raise HTTPException(404, "no such conversation")
+        except ConversationBusy:
+            raise HTTPException(409, "conversation is busy, retry when the previous answer is finished")
+        except ConversationFull:
+            raise HTTPException(409, "this conversation is full; start a new conversation")
         except Exception as err:  # most often the model server being unreachable
             logger.exception("ask failed for %s", what)
             raise HTTPException(502, public_reason(err))
@@ -366,8 +379,10 @@ def create_app(
 
     @v1.post("/documents/{doc_id}/ask")
     def ask(doc_id: str, request: AskRequest, owner: str = Depends(current_owner)) -> Dict[str, Any]:
-        return answer_request(request, lambda: svc().ask(doc_id, owner, request.question, request.config, request.style),
-                              f"document {doc_id}")
+        return answer_request(
+            request, lambda: svc().ask(doc_id, owner, request.question, request.config, request.style,
+                                       conversation_id=request.conversation_id),
+            f"document {doc_id}")
 
     @v1.post("/ask")
     def ask_across(request: AskAcrossRequest, owner: str = Depends(current_owner)) -> Dict[str, Any]:

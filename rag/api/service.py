@@ -6,6 +6,11 @@ One upload = one workspace folder:
 
 so documents never share an index and deleting one is deleting its folder. The existing
 pipelines are used as they are: ingest() builds the workspace, RagPipeline answers from it.
+
+Conversations (rag/api/conversations.py) live under the same root. A conversation over one document
+sits in that document's chat/conversations/ folder, so it goes with the folder; a conversation over
+several or all documents sits in _conversations/<owner_key>/ and is removed when any document of its
+scope is deleted.
 """
 
 import hashlib
@@ -20,6 +25,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Sequence, Set
 
+from rag.api.conversations import ConversationStore, new_turn, to_history_turns
 from rag.common.embed import Embedder
 from rag.common.llm import LLM
 from rag.common.chunk_store import ChunkStore, MemoryChunkStore, Scope
@@ -32,6 +38,7 @@ from rag.ingestion.sandbox import DEFAULT_MEMORY_MB, DEFAULT_TIMEOUT_SECONDS, ex
 from rag.query.about import answer_about
 from rag.query.configs import CONFIGS
 from rag.query.guard import filter_output, scan_chunks
+from rag.query.history import HISTORY_WINDOW_TURNS, block_turns, render_block, window
 from rag.query.pipeline import RagPipeline, RetrievalPipeline
 from rag.query.rerank import Reranker
 
@@ -72,6 +79,7 @@ class DocumentService:
         max_pages: int = DEFAULT_MAX_PAGES,
         extract_timeout: float = DEFAULT_TIMEOUT_SECONDS,
         extract_memory_mb: int = DEFAULT_MEMORY_MB,
+        conversations: Optional[ConversationStore] = None,
     ):
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
@@ -91,6 +99,8 @@ class DocumentService:
         self._running: Set[str] = set()  # documents being ingested right now
         self._deleting: Set[str] = set()  # documents deleted while an ingestion was still running
         self.store: ChunkStore = store or MemoryChunkStore()  # a vector database plugs in here
+        # conversation files live under this root (D-01); a test may pass its own store on the same root
+        self.conversations = conversations or ConversationStore(self.root)
         self._recover_interrupted()
 
     # ---- paths and status ---------------------------------------------------------------
@@ -102,6 +112,16 @@ class DocumentService:
         if doc_id in self._deleting or not path.is_dir():
             raise NotFound(doc_id)
         return path
+
+    def _alive(self, doc_ids: Sequence[str]) -> bool:
+        """The conversation writer's check: True only while every document still exists and is not
+        being deleted."""
+        try:
+            for doc_id in doc_ids:
+                self._dir(doc_id)
+        except NotFound:
+            return False
+        return True
 
     @staticmethod
     def _retry(action, errors, seconds: float = 2.0):
@@ -435,25 +455,43 @@ class DocumentService:
         }
 
     def ask(self, doc_id: str, owner: str, question: str, config: str = "weighted",
-            style: str = "standard") -> Dict[str, Any]:
-        return self.ask_documents(owner, [doc_id], question, config, style)
+            style: str = "standard", conversation_id: Optional[str] = None) -> Dict[str, Any]:
+        return self.ask_documents(owner, [doc_id], question, config, style, conversation_id=conversation_id)
 
-    def _retrieve(self, owner: str, doc_ids: Optional[Sequence[str]], question: str, config: str, style: str):
-        """Everything before the model is called: which documents, loading them, and the retrieval
-        trace. Raises NotFound or BadUpload here, so a streaming request can still answer with a
-        proper HTTP status before any streaming starts."""
+    def _retrieve(self, owner: str, doc_ids: Optional[Sequence[str]], question: str, config: str, style: str,
+                  conversation_id: Optional[str] = None):
+        """Everything before the model is called: which documents, the conversation, loading the
+        documents, and the retrieval trace. Every failure (NotFound, BadUpload, NoSuchConversation,
+        ConversationBusy, ConversationFull) raises here, before any model call, so a streaming request
+        can still answer with a proper HTTP status before any streaming starts. The documents are
+        checked before the conversation, so a request failing both gets the document error. The
+        conversation's lease is released on any raise after it was taken; on success the caller owns
+        it (info["lease"]). Retrieval runs on the raw question; the history only reaches the prompt."""
         statuses = self._ready_documents(owner, doc_ids)
-        for status in statuses:
-            self._ensure_loaded(status)
-        names = {status["id"]: status["name"] for status in statuses}
-        retrieval = RetrievalPipeline(self.store, self.embedder, Scope(owner, tuple(names)), self.reranker)
-        single = len(statuses) == 1
-        started = time.perf_counter()
-        query_id = f"{statuses[0]['id'] if single else 'multi'}-{int(time.time() * 1000)}"
-        rag = RagPipeline(retrieval, self.llm, style=style, subject="document")
-        trace = retrieval.run(query_id, question, CONFIGS[config])
-        return rag, trace, {"names": names, "single": single, "started": started, "query_id": query_id,
-                            "first": statuses[0]["id"]}
+        conversation = self.conversations.open(owner, doc_ids, conversation_id)
+        lease = self.conversations.lease(conversation)
+        try:
+            turns = self.conversations.load_turns(conversation)  # read after the lease, so none is missed
+            self.conversations.check_room(turns)
+            for status in statuses:
+                self._ensure_loaded(status)
+            names = {status["id"]: status["name"] for status in statuses}
+            retrieval = RetrievalPipeline(self.store, self.embedder, Scope(owner, tuple(names)), self.reranker)
+            single = len(statuses) == 1
+            started = time.perf_counter()
+            query_id = f"{statuses[0]['id'] if single else 'multi'}-{int(time.time() * 1000)}"
+            rag = RagPipeline(retrieval, self.llm, style=style, subject="document")
+            trace = retrieval.run(query_id, question, CONFIGS[config])
+            block = render_block(window(to_history_turns(turns), HISTORY_WINDOW_TURNS))
+            shown = block_turns(block)
+            trace.config["conversation"] = {"id": conversation.id, "turn": len(turns) + 1,
+                                            "history_turns": shown, "dropped_turns": len(turns) - shown}
+            return rag, trace, {"names": names, "single": single, "started": started, "query_id": query_id,
+                                "first": statuses[0]["id"], "conversation": conversation, "lease": lease,
+                                "history_block": block, "turn": len(turns) + 1, "question": question}
+        except BaseException:
+            lease.release()
+            raise
 
     def _describe(self, trace, info: Dict[str, Any]) -> Dict[str, Any]:
         """Save the trace (single-document questions only) and build the response."""
@@ -470,6 +508,8 @@ class DocumentService:
         context = trace.stage("context").hits
         return {
             "query_id": query_id,
+            "conversation_id": info["conversation"].id,
+            "turn": info["turn"],
             "answer": trace.answer,
             "abstained": usage.get("abstained", False),
             "blocked": usage.get("blocked", []),
@@ -487,12 +527,29 @@ class DocumentService:
             "seconds": round(time.perf_counter() - started, 2),
         }
 
+    def _remember(self, trace, info: Dict[str, Any], result: Dict[str, Any]) -> None:
+        """Store the turn as the caller saw it, then free the conversation. Called only on the success
+        path, before the answer is returned or the final event is yielded (D-09, D-10); it runs whether
+        or not keep_traces is on, because the history is what the next question needs (D-11)."""
+        turn = new_turn(info["question"], result["answer"], list(info["names"]), info["query_id"])
+        try:
+            self.conversations.append_turn(info["conversation"], turn, self._alive)
+        finally:
+            info["lease"].release()
+
     def ask_documents(self, owner: str, doc_ids: Optional[Sequence[str]], question: str,
-                      config: str = "weighted", style: str = "standard") -> Dict[str, Any]:
-        """Answer from one, several or (doc_ids None) all of the owner's documents."""
-        rag, trace, info = self._retrieve(owner, doc_ids, question, config, style)
-        rag.answer(trace)
-        return self._describe(trace, info)
+                      config: str = "weighted", style: str = "standard",
+                      conversation_id: Optional[str] = None) -> Dict[str, Any]:
+        """Answer from one, several or (doc_ids None) all of the owner's documents. conversation_id None
+        starts a new conversation; the response carries its id and the turn number."""
+        rag, trace, info = self._retrieve(owner, doc_ids, question, config, style, conversation_id)
+        try:
+            rag.answer(trace, history_block=info["history_block"])
+            result = self._describe(trace, info)
+            self._remember(trace, info, result)
+            return result
+        finally:
+            info["lease"].release()
 
     def ask_documents_stream(self, owner: str, doc_ids: Optional[Sequence[str]], question: str,
                              config: str = "weighted", style: str = "standard") -> Iterator[Dict[str, Any]]:
@@ -519,5 +576,6 @@ class DocumentService:
                         yield {"event": "final", "data": result}
             finally:
                 stream.close()  # a reader that went away must stop the model, not leave it running
+                info["lease"].release()
 
         return events()
