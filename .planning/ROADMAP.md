@@ -18,7 +18,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 
 - [x] **Phase 1: Safety net and prompt seam** - Pin single-turn prompts, retrieval numbers and the test baseline before any shared function is edited (completed 2026-10-25)
 - [x] **Phase 2: Conversation store and memory in the answer prompt** - Owner-scoped, deletable server-side history that the answer prompt uses, rewrite off (completed 2026-10-25)
-- [ ] **Phase 3: Rewrite, clarify and topic switch** - Standalone-question rewrite before retrieval, one clarifying question, clean history on a topic switch, behind a default-off switch
+- [x] **Phase 3: Rewrite, clarify and topic switch** - Standalone-question rewrite before retrieval, one clarifying question, clean history on a topic switch, behind a default-off switch (completed 2026-10-25)
 - [ ] **Phase 4: Multi-turn evaluation and the default decision** - Multi-turn golden set and an on/off/oracle experiment that sets the rewrite default
 - [ ] **Phase 5: Chat page and honest docs** - Page keeps and resets the conversation, shows clarifying questions, and the docs describe only what was built and measured
 
@@ -118,26 +118,26 @@ Plans:
   4. An ambiguous follow-up returns exactly one clarifying question through the normal response and SSE shape (no passages, no citations, not abstained), and an ambiguous message right after a clarification never produces a second clarification in a row.
   5. A topic switch starts a clean history for the rewrite, and four deliberately bad fake rewrites (invented details, dropped constraints, wrong pronoun resolution, an earlier topic leaking into a new question) are each caught by a test and fall back to the raw message with a recorded reason.
 
-**Plans:** 8 plans
+**Plans:** 8/8 plans complete
 
 Plans:
 **Wave 1**
-- [ ] 03-01-PLAN.md — P3_BASE record, Phase 2 contract check, rag/query/rewrite.py: gate, rewriter prompts, one-line parser, guards, total rewrite_question (wave 1)
-- [ ] 03-02-PLAN.md — rag/api/conversations.py: optional kind "clarify" and topic_start on a stored turn, since_topic_start (wave 1)
-- [ ] 03-03-PLAN.md — data/golden/conversations_draft.jsonl: eight draft multi-turn rows marked pending-human for owner review (wave 1)
+- [x] 03-01-PLAN.md — P3_BASE record, Phase 2 contract check, rag/query/rewrite.py: gate, rewriter prompts, one-line parser, guards, total rewrite_question (wave 1)
+- [x] 03-02-PLAN.md — rag/api/conversations.py: optional kind "clarify" and topic_start on a stored turn, since_topic_start (wave 1)
+- [x] 03-03-PLAN.md — data/golden/conversations_draft.jsonl: eight draft multi-turn rows marked pending-human for owner review (wave 1)
 
 **Wave 2** *(blocked on Wave 1 completion)*
-- [ ] 03-04-PLAN.md — Wire service.py and main.py behind RAG_REWRITE/RAG_REWRITER: rewrite before retrieval, visible fallback, clarify short-circuit, topic window, .env.example (wave 2)
-- [ ] 03-05-PLAN.md — tests/test_rewrite.py (new): gate table, prompt, parser, guards, four named bad rewrites, known limit, failure codes, totality (wave 2)
+- [x] 03-04-PLAN.md — Wire service.py and main.py behind RAG_REWRITE/RAG_REWRITER: rewrite before retrieval, visible fallback, clarify short-circuit, topic window, .env.example (wave 2)
+- [x] 03-05-PLAN.md — tests/test_rewrite.py (new): gate table, prompt, parser, guards, four named bad rewrites, known limit, failure codes, totality (wave 2)
 
 **Wave 3** *(blocked on Wave 2 completion; the service test plans run one per wave because their fail-first proofs check rag/ files out)*
-- [ ] 03-06-PLAN.md — tests/test_rewrite_api.py (new): call counts, switch and settings, retrieval on the rewrite, visible fallback before any SSE byte, real Ollama client (wave 3)
+- [x] 03-06-PLAN.md — tests/test_rewrite_api.py (new): call counts, switch and settings, retrieval on the rewrite, visible fallback before any SSE byte, real Ollama client (wave 3)
 
 **Wave 4** *(blocked on Wave 3 completion)*
-- [ ] 03-07-PLAN.md — tests/test_rewrite_api.py: clarify shape, never two in a row, topic switch clean history, four named bad rewrites through the service (wave 4)
+- [x] 03-07-PLAN.md — tests/test_rewrite_api.py: clarify shape, never two in a row, topic switch clean history, four named bad rewrites through the service (wave 4)
 
 **Wave 5** *(blocked on Wave 4 completion)*
-- [ ] 03-08-PLAN.md — Phase gate: full suite, retrieval invariant, prompt fingerprint, prohibition checks; Phase 3 baseline, D2 resolved and owner flag in STATE.md (wave 5)
+- [x] 03-08-PLAN.md — Phase gate: full suite, retrieval invariant, prompt fingerprint, prohibition checks; Phase 3 baseline, D2 resolved and owner flag in STATE.md (wave 5)
 
 **Open decisions**: D2 (rewrite-failure policy); rewriter model seam and switch name (see Open Decisions below).
 
@@ -254,6 +254,6 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5
 |-------|----------------|--------|-----------|
 | 1. Safety net and prompt seam | 7/7 | Complete    | 2026-10-25 |
 | 2. Conversation store and memory in the answer prompt | 9/9 | Complete    | 2026-10-25 |
-| 3. Rewrite, clarify and topic switch | 0/TBD | Not started | - |
+| 3. Rewrite, clarify and topic switch | 8/8 | Complete    | 2026-10-25 |
 | 4. Multi-turn evaluation and the default decision | 0/TBD | Not started | - |
 | 5. Chat page and honest docs | 0/TBD | Not started | - |
