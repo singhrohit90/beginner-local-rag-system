@@ -185,11 +185,17 @@ async function refresh() {
     node.onclick = () => select(d.id);
     if (d.state === "ready") {
       const pick = el("input", { type: "checkbox", checked: checked.has(d.id), title: "Include in questions over checked documents" });
-      pick.onclick = (e) => { e.stopPropagation(); if (pick.checked) checked.add(d.id); else checked.delete(d.id); updateChat(); };
+      pick.onclick = (e) => { e.stopPropagation(); if (pick.checked) checked.add(d.id); else checked.delete(d.id); if ($("scope").value === "checked") resetConversation(); updateChat(); };
       node.prepend(pick);
     }
     const del = el("button", { textContent: "Delete", title: "Delete this document" });
-    del.onclick = async (e) => { e.stopPropagation(); await api("/v1/documents/" + d.id, { method: "DELETE" }); if (selected === d.id) selected = null; checked.delete(d.id); refresh().then(updateChat); };
+    del.onclick = async (e) => {
+      e.stopPropagation();
+      const ids = targets(), touches = ids === null ? d.state === "ready" : ids.includes(d.id);  // membership before the request
+      await api("/v1/documents/" + d.id, { method: "DELETE" });
+      if (touches) resetConversation();
+      if (selected === d.id) selected = null; checked.delete(d.id); refresh().then(updateChat);
+    };
     node.append(el("div", {}, del));
     box.append(node);
   }
@@ -202,8 +208,9 @@ function schedulePoll() {
   poll = setTimeout(() => refresh().then(updateChat).catch((err) => { showError(err.message); schedulePoll(); }), 2000);
 }
 
-// Choosing another document keeps the conversation: each question says which documents it went to.
-function select(id) { selected = id; refresh().then(updateChat); }
+// Under "this document" another document is another conversation, so the page starts afresh; under the other
+// scopes a click only highlights a row and the conversation goes on.
+function select(id) { if ($("scope").value === "one" && id !== selected) resetConversation(); selected = id; refresh().then(updateChat); }
 
 function scopeLabel() {
   const scope = $("scope").value, d = docs.find((x) => x.id === selected);
@@ -228,7 +235,7 @@ function updateChat() {
   $("config").disabled = $("mode").value === "about";  // retrieval settings do not apply to profiles
   $("question").placeholder = !ready ? "Loading the models..." : can ? "Ask a question (Enter sends, Shift+Enter adds a line)" : scope === "checked" ? "Tick at least one ready document" : d && d.state !== "ready" ? "Document is " + d.state + "..." : "Select a document first";
 }
-$("scope").onchange = updateChat;
+$("scope").onchange = () => resetConversation();
 $("mode").onchange = updateChat;
 $("newconv").onclick = () => resetConversation();
 $("question").onkeydown = (e) => {  // Enter sends, Shift+Enter makes a new line
@@ -240,7 +247,9 @@ $("upload").onsubmit = async (e) => {
   const form = new FormData();
   form.append("file", $("file").files[0]); form.append("chunker", $("chunker").value);
   try {
-    const d = await api("/v1/documents", { method: "POST", body: form }); selected = d.id; $("file").value = "";
+    const d = await api("/v1/documents", { method: "POST", body: form });
+    if ($("scope").value === "one" && selected !== d.id) resetConversation();
+    selected = d.id; $("file").value = "";
     if (d.duplicate) showError(`You already uploaded this file as "${d.name}", so it was selected instead of indexed again.`);
   }
   catch (err) { showError(err.message); }
