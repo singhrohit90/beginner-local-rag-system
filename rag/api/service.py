@@ -26,7 +26,7 @@ import weakref
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Sequence, Set
 
-from rag.api.conversations import ConversationStore, new_turn, to_history_turns
+from rag.api.conversations import ConversationFull, ConversationStore, new_turn, to_history_turns
 from rag.common.embed import Embedder
 from rag.common.llm import LLM
 from rag.common.chunk_store import ChunkStore, MemoryChunkStore, Scope
@@ -39,7 +39,8 @@ from rag.ingestion.sandbox import DEFAULT_MEMORY_MB, DEFAULT_TIMEOUT_SECONDS, ex
 from rag.query.about import answer_about
 from rag.query.configs import CONFIGS
 from rag.query.guard import filter_output, scan_chunks
-from rag.query.history import HISTORY_WINDOW_TURNS, block_turns, render_block, window
+from rag.query.generate import build_prompts
+from rag.query.history import HISTORY_WINDOW_TURNS, block_turns, fits_context, render_block, window
 from rag.query.pipeline import RagPipeline, RetrievalPipeline
 from rag.query.rerank import Reranker
 
@@ -378,7 +379,12 @@ class DocumentService:
         with self._load_lock:
             self._deleting.add(doc_id)
             self.store.delete_document(doc_id)
-        self._remove_tree(directory)
+        # A conversation writer holds the same lock while it checks the documents are alive and writes, so
+        # a write either lands before the folder goes (and goes with it, or is purged) or starts after it
+        # (and is dropped). The purge runs while the id is still marked as deleting.
+        with self.conversations.lock:
+            self._remove_tree(directory)
+            self.conversations.purge_document(owner, doc_id)
         if doc_id not in self._running:  # otherwise the ingestion thread finishes the cleanup when it stops
             self._deleting.discard(doc_id)
 
@@ -484,6 +490,14 @@ class DocumentService:
             rag = RagPipeline(retrieval, self.llm, style=style, subject="document")
             trace = retrieval.run(query_id, question, CONFIGS[config])
             block = render_block(window(to_history_turns(turns), HISTORY_WINDOW_TURNS))
+            if block:
+                # Measured on the real prompt, so spotlight framing counts; never on a first turn, so a
+                # single-turn question behaves exactly as today. Not trace.prompt: the stream builds its
+                # prompt lazily. The same 409 as the caps; the except below releases the lease.
+                system, user = build_prompts(question, trace.stage("context").hits, style, "document",
+                                             history_block=block)
+                if not fits_context(system, user):
+                    raise ConversationFull()
             shown = block_turns(block)
             trace.config["conversation"] = {"id": conversation.id, "turn": len(turns) + 1,
                                             "history_turns": shown, "dropped_turns": len(turns) - shown}
