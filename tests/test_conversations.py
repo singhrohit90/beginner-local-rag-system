@@ -314,7 +314,8 @@ def test_a_delete_during_a_turn_leaves_no_conversation_file(tmp_path, scope, str
 
     def ask():
         if streamed:
-            outcome.append(list(service.ask_documents_stream("local", doc_ids, "What does replication do?"))[-1]["data"])
+            events = list(service.ask_documents_stream("local", doc_ids, "What does replication do?"))
+            outcome.append(events[-1]["data"])
         else:
             outcome.append(service.ask_documents("local", doc_ids, "What does replication do?"))
 
