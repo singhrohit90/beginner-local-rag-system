@@ -69,22 +69,24 @@ import argparse
 import json
 import logging
 import re
+import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-from rag.common.config import GOLDEN_DIR, PROCESSED_DIR, RUNS_DIR
+from rag.common.config import GOLDEN_DIR, PROCESSED_DIR, ROOT, RUNS_DIR
 from rag.common.embed import get_embedder
 from rag.common.log import setup_logging
 from rag.common.secrets import setting
 from rag.common.trace import Trace
 from rag.ingestion.chunking.base import load_chunkset
 from rag.ingestion.index import get_index
+from rag.observe.golden import GoldQuestion, load_golden
 from rag.observe.golden_conversations import GoldConversation, load_conversations
 from rag.observe.retrieval_quality.metrics import score_hits, strict_trace
 from rag.query.configs import CONFIGS, RetrievalConfig
-from rag.query.history import HistoryTurn, window
+from rag.query.history import HISTORY_ANSWER_MAX_WORDS, HistoryTurn, window
 from rag.query.pipeline import RetrievalPipeline
 from rag.query.rewrite import RewriteResult, needs_rewrite, rewrite_question
 
@@ -283,6 +285,121 @@ def check_set_summary(rows: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
     }
 
 
+def unrelated_turn(questions: Sequence[GoldQuestion], i: int) -> HistoryTurn:
+    """A prior turn about something else: the next question and the first sentence of its answer."""
+    q = questions[(i + 1) % len(questions)]
+    text = q.reference_answer
+    cut = text.find(". ")
+    first = text[: cut + 1] if cut >= 0 else text
+    answer = " ".join(first.split()[:HISTORY_ANSWER_MAX_WORDS])
+    return HistoryTurn(q.question, answer, FIXED_ASKED_AT)
+
+
+def run_regression(
+    pipeline: RetrievalPipeline, config: RetrievalConfig, questions: Sequence[GoldQuestion], rewriter: Any,
+    unrelated: bool = False,
+) -> Dict[str, Any]:
+    """D-09: each answerable single-turn question asked as a first turn (empty window) with rewriting on must
+    make no rewriter call and return the same context chunk ids as off. With unrelated=True each question
+    follows one unrelated turn; that variant is a non-gating over-rewriting detector."""
+    answerable = [q for q in questions if q.answerable]
+    counter = CallCounter(rewriter)
+    identical = fired_count = 0
+    changed_ids: List[str] = []
+    hit_changed: List[str] = []
+    statuses: Dict[str, int] = {}
+    off_hits: List[float] = []
+    off_mrrs: List[float] = []
+    for i, q in enumerate(answerable):
+        off, _ = score_query(pipeline, config, f"{q.id}__off", q.question, q.gold_pages, q.evidence_terms)
+        off_hits.append(off["hit@5"])
+        off_mrrs.append(off["mrr"])
+        win = [unrelated_turn(answerable, i)] if unrelated else []
+        result, fired = rewrite_for(counter, q.question, win)
+        fired_count += int(fired)
+        statuses[result.status] = statuses.get(result.status, 0) + 1
+        query = effective_query(q.question, result)
+        if query is None:
+            changed_ids.append(q.id)
+            if off["hit@5"] != 0.0:
+                hit_changed.append(q.id)
+            continue
+        on, _ = score_query(pipeline, config, f"{q.id}__on", query, q.gold_pages, q.evidence_terms)
+        if on["chunk_ids"] == off["chunk_ids"]:
+            identical += 1
+        else:
+            changed_ids.append(q.id)
+        if on["hit@5"] != off["hit@5"]:
+            hit_changed.append(q.id)
+    n = len(answerable)
+    return {
+        "n": n,
+        "identical": identical,
+        "rewriter_calls": counter.calls,
+        "gate_fired": fired_count,
+        "changed_ids": changed_ids,
+        "hit_changed": hit_changed,
+        "statuses": statuses,
+        "off_hit@5": round(sum(off_hits) / n, 3) if n else 0.0,
+        "off_mrr": round(sum(off_mrrs) / n, 3) if n else 0.0,
+        "unrelated": unrelated,
+    }
+
+
+def rule_section(text: str) -> str:
+    """The shipping rule section with whitespace collapsed, or "" when the heading is absent."""
+    lines = text.splitlines()
+    start = next((i for i, line in enumerate(lines) if line.rstrip() == RULE_HEADING), None)
+    if start is None:
+        return ""
+    collected: List[str] = []
+    for line in lines[start + 1:]:
+        if line.startswith("## "):
+            break
+        collected.append(line)
+    return " ".join(" ".join(collected).split())
+
+
+def _git(root: Path, *args: str) -> subprocess.CompletedProcess:
+    return subprocess.run(["git", *args], cwd=root, capture_output=True, text=True, encoding="utf-8", check=False)
+
+
+def rule_status(root: Path = ROOT) -> Dict[str, Any]:
+    """Whether the shipping rule may gate a scored run: committed, clean, unchanged since its first commit,
+    and first committed without results. Git runs through argv lists, never a shell."""
+    log = _git(root, "log", "--diff-filter=A", "--format=%H", "--", RULE_PATH).stdout
+    added = [line for line in log.splitlines() if line.strip()]
+    rule_commit = added[-1].strip() if added else None
+    committed = rule_commit is not None
+    clean = (_git(root, "ls-files", "--error-unmatch", RULE_PATH).returncode == 0
+             and _git(root, "diff", "--quiet", "HEAD", "--", RULE_PATH).returncode == 0)
+    first_text = _git(root, "show", f"{rule_commit}:{RULE_PATH}").stdout if committed else ""
+    path = root / RULE_PATH
+    working_text = path.read_text(encoding="utf-8") if path.exists() else ""
+    first_rule = rule_section(first_text)
+    unchanged = committed and first_rule != "" and first_rule == rule_section(working_text)
+    first_has_results = any(line.startswith("## Results") for line in first_text.splitlines())
+    head = _git(root, "rev-parse", "HEAD").stdout.strip()
+    return {"path": RULE_PATH, "rule_commit": rule_commit, "head": head, "committed": committed,
+            "clean": clean, "unchanged": unchanged, "first_has_results": first_has_results}
+
+
+def scoring_refusal(arms: Sequence[str], status: Dict[str, Any], regression: bool = False) -> Optional[str]:
+    """Why a mode that can call the rewriter must not run, or None. A rule edited after numbers is no rule."""
+    if "on" not in arms and not regression:
+        return None
+    prefix = f"refusing to run the on arm: the shipping rule in {RULE_PATH}"
+    if not status["committed"]:
+        return f"{prefix} is not committed"
+    if not status["clean"]:
+        return f"{prefix} has uncommitted changes"
+    if not status["unchanged"]:
+        return f"{prefix} changed since its first commit"
+    if status["first_has_results"]:
+        return f"{prefix} was first committed together with results"
+    return None
+
+
 def preflight(llm: Any) -> Optional[str]:
     """One tiny call before a live arm. None when the model answered, else the exception class name, so an
     unreachable model skips its arm instead of recording 100% fallbacks (D-14)."""
@@ -340,18 +457,65 @@ def _meta(args: argparse.Namespace, golden: Path, items: int) -> Dict[str, Any]:
     }
 
 
+def _print_regression(result: Dict[str, Any]) -> None:
+    print(f"regression: {result['identical']}/{result['n']} identical, rewriter calls {result['rewriter_calls']}")
+    print(f"regression off hit@5 {result['off_hit@5']:.3f} mrr {result['off_mrr']:.3f}")
+
+
+def _unrelated(pipeline: RetrievalPipeline, config: RetrievalConfig, questions: Sequence[GoldQuestion],
+               raw: Any, spec: str, reachable: Optional[str]) -> Dict[str, Any]:
+    if reachable is not None:
+        print(f"arm skipped: model unreachable: regression with one unrelated turn (rewriter {spec}: {reachable})")
+        return {"skipped": f"rewriter {spec} unreachable ({reachable})"}
+    result = run_regression(pipeline, config, questions, raw, unrelated=True)
+    rewritten = result["statuses"].get("rewritten", 0)
+    print(f"regression with one unrelated turn (not gating): gate fired {result['gate_fired']}, "
+          f"rewritten {rewritten}, hit@5 changed {len(result['hit_changed'])} of {result['n']}")
+    return result
+
+
 def main() -> None:
     setup_logging()
     args = build_parser().parse_args()
+    if args.check_rule:
+        status = rule_status()
+        yes = {True: "yes", False: "no"}
+        print(f"rule commit {status['rule_commit'] or 'none'}; committed {yes[status['committed']]}; "
+              f"clean {yes[status['clean']]}; unchanged {yes[status['unchanged']]}; "
+              f"first commit has results {yes[status['first_has_results']]}")
+        if not (status["committed"] and status["unchanged"] and not status["first_has_results"]):
+            raise SystemExit(1)
+        return
     out_dir = report_dir(args.name)
+    arms = [a.strip() for a in args.arms.split(",") if a.strip()]
+    status = rule_status()  # captured once, before any arm runs; the report records what the guard checked
+    if args.regression_only or not args.check_set:
+        refusal = scoring_refusal(["on"] if args.regression_only else arms, status, regression=args.regression_only)
+        if refusal:
+            print(refusal)
+            raise SystemExit(2)
+
     embedder = get_embedder(args.embedder)
     chunkset = load_chunkset(args.chunks_dir, CHUNKER)
     index = get_index(chunkset, embedder, args.variant, False)
     pipeline = RetrievalPipeline.from_chunkset(chunkset, index, embedder, None)
     config = CONFIGS[CONFIG_NAME]
 
+    if args.regression_only:
+        from rag.common.llm import get_llm  # imported here so the pure functions above load without a backend
+
+        questions = load_golden(SINGLE_TURN_GOLDEN)
+        meta = dict(_meta(args, SINGLE_TURN_GOLDEN, len(questions)), head=status["head"], rule=status)
+        raw = get_llm(args.rewriter, cache_dir=None)  # no disk cache (PITFALLS Pitfall 7)
+        regression = run_regression(pipeline, config, questions, raw)
+        _print_regression(regression)
+        unrelated = _unrelated(pipeline, config, questions, raw, args.rewriter, preflight(raw))
+        write_report({"meta": meta, "regression": regression, "regression_unrelated": unrelated}, out_dir)
+        print(f"written to {out_dir}")
+        return
+
     items = load_conversations(args.golden)
-    meta = _meta(args, args.golden, len(items))
+    meta = dict(_meta(args, args.golden, len(items)), head=status["head"], rule=status)
     if args.check_set:
         rows, _ = run_arms(pipeline, config, items, ["off", "oracle"])
         summary = check_set_summary(rows)
@@ -361,25 +525,37 @@ def main() -> None:
               "pronoun+constraint items miss with off")
         print(f"oracle misses {len(summary['oracle_misses'])}")
         write_report({"meta": meta, "check_set": summary, "rows": rows}, out_dir)
-    else:
-        arms = [a.strip() for a in args.arms.split(",") if a.strip()]
-        arms_not_run: Dict[str, str] = {}
-        rewriter: Any = None
-        if "on" in arms:
-            from rag.common.llm import get_llm  # imported here so the pure functions above load without a backend
+        print(f"written to {out_dir}")
+        return
 
-            # No disk cache: repeats must be real draws and no rewriter text outlives the run.
-            raw = get_llm(args.rewriter, cache_dir=None)
-            reason = preflight(raw)
-            if reason is not None:
-                arms = [a for a in arms if a != "on"]
-                arms_not_run["on"] = f"rewriter {args.rewriter} unreachable ({reason})"
-                print(f"arm skipped: model unreachable: on (rewriter {args.rewriter}: {reason})")
-            else:
-                rewriter = CallCounter(raw)
-        rows, _ = run_arms(pipeline, config, items, arms, rewriter)
-        print(f"arms run: {','.join(arms)}")
-        write_report({"meta": meta, "arms_not_run": arms_not_run, "rows": rows}, out_dir)
+    arms_not_run: Dict[str, str] = {}
+    rewriter: Any = None
+    raw: Any = None
+    reason: Optional[str] = None
+    if "on" in arms:
+        from rag.common.llm import get_llm  # imported here so the pure functions above load without a backend
+
+        # No disk cache: repeats must be real draws and no rewriter text outlives the run.
+        raw = get_llm(args.rewriter, cache_dir=None)
+        reason = preflight(raw)
+        if reason is not None:
+            arms = [a for a in arms if a != "on"]
+            arms_not_run["on"] = f"rewriter {args.rewriter} unreachable ({reason})"
+            print(f"arm skipped: model unreachable: on (rewriter {args.rewriter}: {reason})")
+        else:
+            rewriter = CallCounter(raw)
+    rows, _ = run_arms(pipeline, config, items, arms, rewriter)
+    print(f"arms run: {','.join(arms)}")
+    report: Dict[str, Any] = {"meta": meta, "arms_not_run": arms_not_run, "rows": rows}
+    if raw is not None:
+        questions = load_golden(SINGLE_TURN_GOLDEN)
+        report["regression"] = run_regression(pipeline, config, questions, raw)  # empty window: no call
+        _print_regression(report["regression"])
+        report["regression_unrelated"] = _unrelated(pipeline, config, questions, raw, args.rewriter, reason)
+    else:
+        report["regression"] = {"skipped": "the on arm was not requested"}
+        report["regression_unrelated"] = {"skipped": "the on arm was not requested"}
+    write_report(report, out_dir)
     print(f"written to {out_dir}")
 
 
