@@ -146,7 +146,8 @@ _EMBEDDERS: Dict[str, Any] = {}  # embedder spec -> the loaded model
 
 
 def build_default_service() -> DocumentService:
-    """Real models, chosen by .env: RAG_LLM, RAG_EMBEDDER. Heavy, so only built when serving."""
+    """Real models, chosen by .env: RAG_LLM, RAG_EMBEDDER, and with RAG_REWRITE=1 the rewriter
+    RAG_REWRITER (default ollama:qwen2.5:7b). Heavy, so only built when serving."""
     from rag.common.config import DATA_DIR
     from rag.common.embed import get_embedder
     from rag.common.llm import get_llm
@@ -165,13 +166,20 @@ def build_default_service() -> DocumentService:
         store = None  # rebuilt from the files in data/uploads at the first question
     else:
         raise ValueError(f"RAG_STORE must be 'memory' or 'opensearch', not {kind!r}")
+    # no cache: it would keep every uploaded passage and question on disk after a delete
+    llm = get_llm(setting("RAG_LLM", "vllm:/models/gpt-oss-20b"), cache_dir=None)
+    # One switch for rewrite, clarify and topic switch, off by default until it is measured: "1" turns it
+    # on, anything else (or unset) leaves it off.
+    rewrite = setting("RAG_REWRITE", "") == "1"
+    # no cache: the rewriter sees conversation text derived from uploads, which a delete must remove
+    rewrite_llm = get_llm(setting("RAG_REWRITER", "ollama:qwen2.5:7b"), cache_dir=None) if rewrite else None
     return DocumentService(
         root=DATA_DIR / "uploads",
         embedder=embedder,
         store=store,
         embedder_spec=spec,
-        # no cache: it would keep every uploaded passage and question on disk after a delete
-        llm=get_llm(setting("RAG_LLM", "vllm:/models/gpt-oss-20b"), cache_dir=None),
+        llm=llm,
+        rewrite=rewrite, rewrite_llm=rewrite_llm,
     )
 
 
