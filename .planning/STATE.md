@@ -94,6 +94,8 @@ From the approval brief (gate 1, 2026-10-24); see `.planning/runs/20261021-1840-
 - Coding-standards gate -- why later: needs its own session; back when the doc exists.
 - Rest of docs/backlog.md -- why later: unrelated to memory; back after this run.
 
+- max_model_len -- **Park until step: merge gate**: re-read with the command in docs/models.md once the tunnel forward works (2026-10-25: listener up, forward resets with WinError 10054); replace the 8192 floor in docs/models.md and MODEL_CONTEXT_TOKENS; owner deferred it in chat.
+
 ## Deferred Items
 
 Items acknowledged and deferred at milestone close, most recent first:

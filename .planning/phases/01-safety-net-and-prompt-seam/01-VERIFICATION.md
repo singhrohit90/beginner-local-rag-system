@@ -1,8 +1,8 @@
 ---
 phase: 01-safety-net-and-prompt-seam
 verified: 2026-10-25T00:00:00Z
-status: human_needed
-score: 3/4 must-haves verified
+status: passed
+score: 3/4 must-haves verified; SC4 deferred by the owner (see "Owner override")
 covered_files:
   - .planning/phases/01-safety-net-and-prompt-seam/01-01-PLAN.md
   - .planning/phases/01-safety-net-and-prompt-seam/01-01-SUMMARY.md
@@ -203,3 +203,10 @@ Nothing under `rag/api` or `rag/common` changed since `853f021`; the fingerprint
 
 _Verified: 2026-10-25_
 _Verifier: Claude (gsd-verifier)_
+
+## Owner override (2026-10-25)
+
+Status set from `human_needed` to `passed` by the flow lead on the owner's explicit instruction in chat ("yes please. i will check the putty issue later"), so phase 1 can close. The two human items:
+
+1. SC4, `max_model_len` not read: DEFERRED, not verified. The tunnel listener is up but the forward resets (`[WinError 10054]`, 2026-10-25 08:10). `MODEL_CONTEXT_TOKENS` stays at the 8192-token floor. Parked in STATE.md: re-read before the merge gate.
+2. `RAG_NONCE_KEY` in `.env`: RESOLVED. The owner confirmed `.env` does not set it, so the spotlight key is random per process (the safe default).
