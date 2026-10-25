@@ -101,6 +101,8 @@ From the approval brief (gate 1, 2026-10-24); see `.planning/runs/20261021-1840-
 - D-11 retention (phase 2 keeps answer text for every page question until phase 5 adds the page conversation_id) -- **Park until step: phase 5**; listed at the merge gate.
 - Flaky test tests/test_api.py::test_a_delete_during_a_load_leaves_nothing_in_the_store[one document] -- **Park until it hurts**: failed once under load in a worktree, passed every rerun; unparked when it fails in a gate run.
 
+- Draft multi-turn golden rows (data/golden/conversations_draft.jsonl, 8 rows, all `review: pending-human`) -- decided at gate 1: owner reviews after the merge. The owner must confirm or rewrite every row, remove the `review` key once reviewed, add items until the set covers the categories in ROADMAP phase 4 criterion 1, and check baseline misses (a pronoun follow-up that rewrite-off retrieval already answers does not test the rewriter). No code reads the file until then.
+
 ## Deferred Items
 
 Items acknowledged and deferred at milestone close, most recent first:
