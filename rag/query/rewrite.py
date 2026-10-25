@@ -263,6 +263,25 @@ def leaked(rewrite: str, message: str, window_text: str) -> bool:
     return bool(added & (set(tokenize(window_text)) - in_message))
 
 
+def classify_failure(err: BaseException) -> str:
+    """"timeout" when the error or anything it wraps (its __cause__ or __context__ chain, or a URLError
+    reason) is a timeout, otherwise "unavailable" (refused, unreachable, anything else). The real Ollama
+    client wraps a URLError in a RuntimeError and lets a bare socket timeout through, so both the chain
+    and the type are checked. The text is read here only to classify; it is never returned or logged."""
+    seen: Set[int] = set()
+    link: Optional[BaseException] = err
+    while link is not None and id(link) not in seen:
+        seen.add(id(link))
+        text = str(link).lower()
+        if isinstance(link, TimeoutError) or "timed out" in text or "timeout" in text:  # socket.timeout is one
+            return "timeout"
+        reason = getattr(link, "reason", None)  # urllib.error.URLError(reason)
+        if isinstance(reason, BaseException) and classify_failure(reason) == "timeout":
+            return "timeout"
+        link = link.__cause__ or link.__context__
+    return "unavailable"
+
+
 def _fallback(message: str, reason: str, elapsed_ms: float = 0.0, rejected: Optional[str] = None) -> RewriteResult:
     return RewriteResult("fallback", message, reason=reason, rejected_question=rejected, elapsed_ms=elapsed_ms)
 
@@ -271,14 +290,28 @@ def rewrite_question(
     llm: LLM, message: str, window: Sequence[HistoryTurn], allow_clarify: bool = True,
     doc_names: Sequence[str] = (),
 ) -> RewriteResult:
-    """One rewriter call for a message the gate sent on."""
+    """One rewriter call for a message the gate sent on. The status is one of:
+    standalone  the model says the message stands alone; question is the raw message.
+    rewritten   a vetted REWRITE: text; question is that text.
+    clarify     a vetted CLARIFY: text in clarify_question (only when allow_clarify); question is the raw message.
+    new_topic   the message starts a new subject; question is the raw message, whatever the model wrote.
+    fallback    anything else, with a reason code from REASONS; question is the raw message.
+
+    The function is total: it never raises. The caller's route turns any exception into a 502, which
+    would silently make the fail-open rule (D-09) fail closed. So question is always safe to retrieve on."""
     system, user = build_rewrite_prompt(message, window, allow_clarify, doc_names)
     if len((system + " " + user).split()) > REWRITE_PROMPT_MAX_WORDS:
         return _fallback(message, "input_too_long")  # A7: never send a prompt the model would truncate
     shown = user  # what the rewriter saw: the Documents line, the history block and the message
     window_text = " ".join(turn.question + " " + turn.answer for turn in window)
     started = time.perf_counter()
-    reply = llm.generate(system, user, max_output_tokens=REWRITE_MAX_OUTPUT_TOKENS)
+    try:
+        reply = llm.generate(system, user, max_output_tokens=REWRITE_MAX_OUTPUT_TOKENS)
+    except Exception as err:  # boundary: a down or slow rewriter must not fail the question (D-09)
+        elapsed_ms = round((time.perf_counter() - started) * 1000, 1)
+        reason = classify_failure(err)
+        logger.warning("rewrite fell back: %s (%s)", reason, type(err).__name__)
+        return _fallback(message, reason, elapsed_ms)
     elapsed_ms = round((time.perf_counter() - started) * 1000, 1)
     tag, payload = parse_reply(getattr(reply, "text", ""))
     if tag == "STANDALONE":
@@ -292,6 +325,8 @@ def rewrite_question(
             return _fallback(message, reason, elapsed_ms, rejected=payload)
         return RewriteResult("rewritten", payload, rewritten_question=payload, elapsed_ms=elapsed_ms)
     if tag == "CLARIFY":
+        if not allow_clarify:  # the prompt offered no CLARIFY form, so the reply broke the protocol (D-13)
+            return _fallback(message, "unparsed", elapsed_ms)
         reason = check_text("clarify", payload, message, shown)
         if reason is not None:
             logger.info("clarify rejected: %s", reason)
