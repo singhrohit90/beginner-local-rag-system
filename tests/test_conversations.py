@@ -24,6 +24,7 @@ from rag.query.generate import build_prompts
 from rag.query.guard import BLOCKED
 from rag.query.history import HISTORY_HEADER, HISTORY_WINDOW_TURNS, render_block, window
 from tests.test_api import COMPACTION, REPLICATION, make_pdf
+from tests.test_stream_api import frames
 
 PARTITIONING = "Partitioning splits a large dataset across nodes by key range or by a hash of the key. " * 6
 
@@ -328,3 +329,119 @@ def test_a_delete_during_a_turn_leaves_no_conversation_file(tmp_path, scope, str
     assert not (service.root / doc_id).exists()
     assert [p for p in service.root.rglob("*") if p.is_file()] == []
     assert service.conversations.dropped_writes == 1
+
+
+def test_delete_is_serialised_with_a_conversation_write(tmp_path, monkeypatch):
+    service = make_service(tmp_path)
+    a = add_document(service, REPLICATION)
+    b = add_document(service, COMPACTION, name="b.pdf")
+    store = service.conversations
+    conv = store.open("local", [a, b], None)
+    entered, release = threading.Event(), threading.Event()
+    original = store._atomic_write
+
+    def held(path, text):
+        entered.set()
+        assert release.wait(30)
+        original(path, text)
+
+    monkeypatch.setattr(store, "_atomic_write", held)
+    writer = threading.Thread(target=lambda: store.append_turn(conv, new_turn("q", "a", [a, b], "id-1"),
+                                                               service._alive))
+    deleter = threading.Thread(target=lambda: service.delete(a, "local"))
+    writer.start()
+    try:
+        assert entered.wait(30)  # the writer holds the store lock inside the write
+        deleter.start()
+        # The delete waits for the store lock; on correct code it cannot have finished, and this bounded
+        # join only affects how strongly the old code is caught, never whether correct code passes.
+        deleter.join(0.5)
+        assert deleter.is_alive()
+        # purge_document takes the store lock by itself, so the folder removal is the step only the delete's
+        # own `with store.lock:` holds back: the document folder must still be there while the write is held.
+        assert (service.root / a).is_dir()
+    finally:
+        release.set()
+    writer.join(30)
+    deleter.join(30)
+    assert not writer.is_alive() and not deleter.is_alive()
+    assert not list((service.root / "_conversations").rglob("*.json"))  # the finished write was purged
+    assert not (service.root / a).exists()
+
+
+@pytest.mark.parametrize("streamed", [False, True], ids=["ordinary", "streamed"])
+def test_a_second_request_on_a_busy_conversation_gets_409(tmp_path, streamed):
+    service = make_service(tmp_path)
+    doc_id = add_document(service, REPLICATION)
+    client = client_for(service)
+    ask = f"/v1/documents/{doc_id}/ask"
+    cid = client.post(ask, json={"question": "q1"}).json()["conversation_id"]
+    gated = GatedLLM()
+    service.llm = gated
+    url = ask + "/stream" if streamed else ask
+    responses = []
+    first = threading.Thread(target=lambda: responses.append(
+        client.post(url, json={"question": "q2", "conversation_id": cid})))
+    first.start()
+    try:
+        assert gated.started.wait(30)
+        busy = client.post(url, json={"question": "q3", "conversation_id": cid})
+        assert busy.status_code == 409
+        assert busy.json() == {"detail": "conversation is busy, retry when the previous answer is finished"}
+        assert not busy.headers["content-type"].startswith("text/event-stream")
+        assert len(gated.prompts) == 1  # the busy request never reached the model
+    finally:
+        gated.release.set()
+    first.join(30)
+    assert not first.is_alive()
+    assert responses[0].status_code == 200
+    path = conversation_file(service, "local", [doc_id], cid)
+    assert [t["question"] for t in stored(path)["turns"]] == ["q1", "q2"]
+    after = client.post(ask, json={"question": "q4", "conversation_id": cid})
+    assert after.status_code == 200 and after.json()["turn"] == 3
+
+
+def test_closing_the_stream_frees_the_conversation_and_stores_nothing(tmp_path):
+    service = make_service(tmp_path, llm=FakeLLM(lambda s, u: "word " * 400))
+    doc_id = add_document(service, REPLICATION)
+    cid = service.ask_documents("local", [doc_id], "q1")["conversation_id"]
+    events = service.ask_documents_stream("local", [doc_id], "q2", conversation_id=cid)
+    assert next(events)["event"] == "token"
+    events.close()
+    path = conversation_file(service, "local", [doc_id], cid)
+    assert [t["question"] for t in stored(path)["turns"]] == ["q1"]
+    service.ask_documents("local", [doc_id], "q3", conversation_id=cid)  # not busy
+    assert [t["question"] for t in stored(path)["turns"]] == ["q1", "q3"]
+
+
+def test_a_failed_turn_is_not_stored_and_frees_the_conversation(tmp_path):
+    service = make_service(tmp_path)
+    doc_id = add_document(service, REPLICATION)
+    client = client_for(service)
+    ask = f"/v1/documents/{doc_id}/ask"
+    cid = client.post(ask, json={"question": "q1"}).json()["conversation_id"]
+    healthy = service.llm
+
+    def broken(system, user):
+        raise ConnectionError("cannot reach the model server")
+
+    service.llm = FakeLLM(broken)
+    assert client.post(ask, json={"question": "q2", "conversation_id": cid}).status_code == 502
+    streamed = client.post(ask + "/stream", json={"question": "q3", "conversation_id": cid})
+    assert streamed.status_code == 200
+    assert [name for name, _ in frames(streamed)] == ["error"]
+    path = conversation_file(service, "local", [doc_id], cid)
+    assert [t["question"] for t in stored(path)["turns"]] == ["q1"]
+    service.llm = healthy
+    after = client.post(ask, json={"question": "q4", "conversation_id": cid})
+    assert after.status_code == 200 and after.json()["turn"] == 2
+
+
+def test_an_unstarted_stream_frees_the_conversation_when_dropped(tmp_path):
+    service = make_service(tmp_path)
+    doc_id = add_document(service, REPLICATION)
+    cid = service.ask_documents("local", [doc_id], "q1")["conversation_id"]
+    events = service.ask_documents_stream("local", [doc_id], "q2", conversation_id=cid)
+    del events  # never started, so its finally never runs; the finalizer must free the conversation
+    gc.collect()
+    assert service.ask_documents("local", [doc_id], "q3", conversation_id=cid)["turn"] == 2
