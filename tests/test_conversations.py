@@ -9,13 +9,13 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
-from rag.api.conversations import new_turn, owner_key
+from rag.api.conversations import ConversationStore, new_turn, owner_key
 from rag.api.main import create_app, current_owner
 from rag.api.service import DocumentService
 from rag.common.embed import HashingEmbedder
 from rag.common.llm import FakeLLM
 from rag.query.guard import BLOCKED
-from tests.test_api import REPLICATION, make_pdf
+from tests.test_api import COMPACTION, REPLICATION, make_pdf
 
 PARTITIONING = "Partitioning splits a large dataset across nodes by key range or by a hash of the key. " * 6
 
@@ -108,3 +108,62 @@ def test_a_turn_stores_the_message_the_shown_answer_the_scope_and_a_timestamp(tm
     assert turns[3]["answer"] == BLOCKED == hostile["answer"]
     text = path.read_text(encoding="utf-8")
     assert "attacker.example" not in text and "SECRET" not in text
+
+
+def test_turns_are_read_after_the_lease_and_appends_keep_earlier_turns(tmp_path):
+    store = ConversationStore(tmp_path)
+    (tmp_path / "abcdef012345").mkdir()
+
+    def live(ids):
+        return True
+
+    first = store.open("local", ["abcdef012345"], None)
+    assert store.append_turn(first, new_turn("q1", "a1", ["abcdef012345"], "id-1"), live)
+    mine = store.open("local", ["abcdef012345"], first.id)
+    other = store.open("local", ["abcdef012345"], first.id)
+    assert store.append_turn(other, new_turn("q2", "a2", ["abcdef012345"], "id-2"), live)  # after mine was opened
+    lease = store.lease(mine)
+    assert [t["question"] for t in store.load_turns(mine)] == ["q1", "q2"]  # nothing written before the lease is hidden
+    assert store.append_turn(mine, new_turn("q3", "a3", ["abcdef012345"], "id-3"), live)
+    assert [t["question"] for t in store.load_turns(mine)] == ["q1", "q2", "q3"]  # completion order, none overwritten
+    lease.release()
+    lease.release()  # idempotent
+    store.lease(mine).release()  # the conversation is free again: no ConversationBusy
+
+
+def test_conversations_are_kept_when_traces_are_off(tmp_path):
+    service = make_service(tmp_path, keep_traces=False)
+    doc_id = add_document(service, REPLICATION)
+    result = service.ask_documents("local", [doc_id], "How does replication survive a node failure?")
+    assert conversation_file(service, "local", [doc_id], result["conversation_id"]).exists()
+    assert not list((service.root / doc_id / "chat").glob("*.json"))  # no trace was written
+
+
+def test_delete_purges_cross_document_conversations_that_touched_the_document(tmp_path):
+    service = make_service(tmp_path)
+    b = add_document(service, COMPACTION, name="b.pdf")
+    c = add_document(service, PARTITIONING, name="c.pdf")
+    w = service.ask_documents("local", None, "What does compaction do?")["conversation_id"]  # resolves B and C
+    a = add_document(service, REPLICATION, name="a.pdf")
+    service.ask_documents("local", None, "And replication?", conversation_id=w)  # now resolves A, B and C
+    x = service.ask_documents("local", [a, b], "How do replication and compaction differ?")["conversation_id"]
+    y = service.ask_documents("local", [b, c], "How do compaction and partitioning differ?")["conversation_id"]
+    d = add_document(service, REPLICATION, owner="bob", name="a.pdf")
+    z = service.ask_documents("bob", None, "How does replication work?")["conversation_id"]
+    folder = service.root / "_conversations" / owner_key("local")
+    damaged = folder / "damaged.json"
+    damaged.write_text("{not json", encoding="utf-8")
+    temporary = folder / f"{y}.json.tmp"
+    temporary.write_text("half a conversation", encoding="utf-8")
+    files = {name: conversation_file(service, owner, None, cid)
+             for name, owner, cid in (("w", "local", w), ("x", "local", x), ("y", "local", y), ("z", "bob", z))}
+    assert all(path.exists() for path in files.values()) and d != a
+
+    service.delete(a, "local")
+
+    assert not files["w"].exists()  # all documents, but a later turn resolved A
+    assert not files["x"].exists()  # declared [A, B]
+    assert files["y"].exists()  # [B, C] never touched A
+    assert files["z"].exists()  # another owner's conversation is not this delete's business
+    assert not damaged.exists() and not temporary.exists()
+    assert service.conversations.purge_document("local", a) == 0  # a second purge finds nothing
