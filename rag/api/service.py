@@ -22,6 +22,7 @@ import shutil
 import threading
 import time
 import uuid
+import weakref
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Sequence, Set
 
@@ -552,18 +553,22 @@ class DocumentService:
             info["lease"].release()
 
     def ask_documents_stream(self, owner: str, doc_ids: Optional[Sequence[str]], question: str,
-                             config: str = "weighted", style: str = "standard") -> Iterator[Dict[str, Any]]:
+                             config: str = "weighted", style: str = "standard",
+                             conversation_id: Optional[str] = None) -> Iterator[Dict[str, Any]]:
         """Like ask_documents, but returns the answer as a stream of events:
 
             {"event": "token", "data": {"text": ...}}   text that has passed the stream guard
-            {"event": "final", "data": {...}}           the same response as ask_documents, plus
+            {"event": "final", "data": {...}}           the same response as ask_documents (with
+                                                        "conversation_id" and "turn"), plus
                                                         "replace": true when the text already sent must be
                                                         replaced by data["answer"] (the final check failed)
 
-        Retrieval happens before this returns, so a missing document or a not-ready one raises here,
-        not part-way through a stream. Closing the returned iterator stops the model."""
-        rag, trace, info = self._retrieve(owner, doc_ids, question, config, style)
-        stream = rag.stream(trace)
+        Retrieval happens before this returns, so a missing document or a not-ready one, and an unknown,
+        busy or full conversation, raises here, not part-way through a stream. Closing the returned
+        iterator stops the model."""
+        rag, trace, info = self._retrieve(owner, doc_ids, question, config, style, conversation_id)
+        lease = info["lease"]
+        stream = rag.stream(trace, history_block=info["history_block"])  # a generator: creating it runs nothing
 
         def events() -> Iterator[Dict[str, Any]]:
             try:
@@ -573,9 +578,15 @@ class DocumentService:
                     else:
                         result = self._describe(trace, info)
                         result["replace"] = bool(value)
+                        # persist, then release, then yield: a client that asks again the moment it sees
+                        # final must not get a spurious 409 while this generator waits to be closed
+                        self._remember(trace, info, result)
                         yield {"event": "final", "data": result}
             finally:
                 stream.close()  # a reader that went away must stop the model, not leave it running
-                info["lease"].release()
+                lease.release()  # idempotent: a model error, a guard stop, a disconnect or an early close
 
-        return events()
+        generator = events()
+        # a generator that is never started never runs its finally; dropping it must still free the conversation
+        weakref.finalize(generator, lease.release)
+        return generator

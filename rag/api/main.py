@@ -387,19 +387,22 @@ def create_app(
     @v1.post("/ask")
     def ask_across(request: AskAcrossRequest, owner: str = Depends(current_owner)) -> Dict[str, Any]:
         return answer_request(
-            request, lambda: svc().ask_documents(owner, request.doc_ids, request.question, request.config, request.style),
+            request, lambda: svc().ask_documents(owner, request.doc_ids, request.question, request.config, request.style,
+                                                 conversation_id=request.conversation_id),
             "several documents")
 
     @v1.post("/documents/{doc_id}/ask/stream")
     def ask_stream(doc_id: str, request: AskRequest, owner: str = Depends(current_owner)) -> StreamingResponse:
         return stream_request(
-            request, lambda: svc().ask_documents_stream(owner, [doc_id], request.question, request.config, request.style),
+            request, lambda: svc().ask_documents_stream(owner, [doc_id], request.question, request.config,
+                                                        request.style, conversation_id=request.conversation_id),
             f"document {doc_id}")
 
     @v1.post("/ask/stream")
     def ask_across_stream(request: AskAcrossRequest, owner: str = Depends(current_owner)) -> StreamingResponse:
         return stream_request(
-            request, lambda: svc().ask_documents_stream(owner, request.doc_ids, request.question, request.config, request.style),
+            request, lambda: svc().ask_documents_stream(owner, request.doc_ids, request.question, request.config,
+                                                        request.style, conversation_id=request.conversation_id),
             "several documents")
 
     @v1.post("/ask-about")
