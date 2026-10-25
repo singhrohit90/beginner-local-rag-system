@@ -60,8 +60,10 @@ Labels: **Built** (code and tests exist), **Not built** (the design only), **Gen
 - **Evaluation:** ask probe questions about early facts after compaction ("what budget did I give at the start?") and compare with the full history; measure the tokens saved and the answer quality at turn 5, 20 and 50.
 
 **In this repo.**
-- **Not built.** The nearest existing thing is a budget for passages, not for conversation: `ContextConfig.max_words` (1500) and `top_k` in `rag/query/select_context.py` cap how much retrieved text goes into the prompt.
-- Because the app is stateless, it can never overflow the context from history; it is the first thing that would change when memory is added.
+- **Built.** A sliding window with word cuts and a word budget (`rag/query/history.py`): the last `HISTORY_WINDOW_TURNS = 6` turns are kept, each earlier question cut to `HISTORY_QUESTION_MAX_WORDS = 60` words, each earlier answer to `HISTORY_ANSWER_MAX_WORDS = 40`, and the whole history block held to `HISTORY_BLOCK_MAX_WORDS = 400`. Tests: `tests/test_history.py`.
+- **Built.** A hard cap: a conversation holds at most `CONVERSATION_MAX_TURNS = 50` turns and `CONVERSATION_MAX_STORED_WORDS = 20000` stored words, after which the next question gets the 409 "this conversation is full; start a new conversation" (`check_room` in `rag/api/conversations.py`). Tests: `tests/test_conversations.py`.
+- **Built.** A prompt-budget check before any model call (`fits_context` in `rag/query/history.py`): the estimated prompt (system prompt, passages, history and question) plus `ANSWER_TOKENS = 600` and the reasoning model's `THINKING_TOKENS = 3000` must fit `MODEL_CONTEXT_TOKENS = 8192`, a floor because the server's real context length was not read. The passages have their own budget: `ContextConfig.max_words` (1500) and `top_k` in `rag/query/select_context.py` cap how much retrieved text goes into the prompt.
+- **Not built.** The rolling summary, structured memory, retrieval over history, and compacting at about 70% of the history budget; a full conversation is refused instead (open item in `docs/backlog.md`).
 
 **Follow-ups.** When do you summarise: on a token threshold or every N turns? (A token threshold; N turns ignores long turns.) Who writes the summary? (A cheaper model, with the raw log kept.) Does a reasoning model change the budget? (Yes: its thinking tokens count against the output limit, see `docs/models.md`.)
 
