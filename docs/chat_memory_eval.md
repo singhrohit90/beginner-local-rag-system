@@ -28,3 +28,87 @@ Decisions taken by the same numbers, written before any run:
 - Judge (D-12). Answers are scored only with the per-question fact checklist (`judge_facts`); an answer-level difference inside the band never changes a default, and the results say when the judge and the rewriter are the same model.
 
 The results end with exactly one line that starts `Decision: ships on` or `Decision: ships off`.
+
+## Results
+
+Command: python -m rag.experiments.conversation --repeats 3 --answers --name p4-qwen
+
+Date: 2026-10-25T17:12:14+00:00
+
+Git commit: eb3f61a9009db473b8edf6668be489317e94c3f1
+
+Rule commit: 9baf0f3334f3158aeafd77db5a07bdbbef9cd02c
+
+Rewriter: ollama:qwen2.5:7b
+
+Rewriter chosen: ollama:qwen2.5:7b (qwen by default, not compared)
+
+Rewriter latency: p50 2979.0 ms, p95 3342.9 ms over 28 calls
+
+Question slot: rewritten question (unmeasured: answers not run)
+
+Judge and rewriter are the same model: not applicable (answers not run)
+
+Regression arm: 37/37 identical, rewriter calls 0 (off hit@5 0.865, mrr 0.663); after one unrelated turn (not gating): gate fired 21, rewritten 17, hit@5 changed 6 of 37
+
+Owner review: 34 of 34 items pending-human; the numbers are provisional until every item is approved and the run is repeated
+
+### Arms (answer items, strict evidence-aware retrieval)
+
+| arm | n | hit@5 | mrr | recall@5 |
+|-----|---|-------|-----|----------|
+| off | 30 | 0.633 | 0.461 | 0.600 |
+| on | 30 | 0.733 | 0.592 | 0.700 |
+| oracle | 30 | 0.867 | 0.686 | 0.833 |
+| concat | 30 | 0.833 | 0.569 | 0.817 |
+
+Oracle gap closed by on: 0.429. False clarifies on answer items: 1.
+
+### Paired on vs off (hit@5)
+
+| items | win | tie | loss | n |
+|-------|-----|-----|------|---|
+| all answer items | 6 | 21 | 3 | 30 |
+| pronoun and constraint | 6 | 9 | 1 | 16 |
+
+Net 3, gain 10.0 points, band 10.0 points, sign test p = 0.2539.
+
+### Per category
+
+| category | n | gate fired | off | on | oracle | concat | win/tie/loss |
+|----------|---|------------|-----|----|--------|--------|--------------|
+| pronoun_follow_up | 10 | 9 | 0.400 | 0.900 | 0.900 | 0.900 | 5/5/0 |
+| constraint_follow_up | 6 | 6 | 0.667 | 0.667 | 1.000 | 1.000 | 1/4/1 |
+| topic_switch | 6 | 3 | 0.833 | 0.667 | 0.833 | 0.500 | 0/5/1 |
+| ambiguous_follow_up | 4 | 4 | clarify: asked 0, named both 0, second clarify 0 | | | | |
+| standalone_in_conversation | 8 | 6 | 0.750 | 0.625 | 0.750 | 0.875 | 0/7/1 |
+
+### Rewrite statuses and gate
+
+Statuses: clarify 1, fallback 1, rewritten 26, skipped 6.
+Fallback reasons: dropped_constraint 1.
+Gate: precision 0.679, recall 0.950, fired 28, misses none. Rewriter calls counted for (e): 28, fallbacks 1.
+must_contain kept rate 0.500; must_not_contain leak rate 0.333.
+Clarify items: 4, asked 0, named both 0, second clarification 0.
+
+### Instability across repeats (reported, not gating)
+
+- repeat 1: on hit@5 0.733, changed vs repeat 1: none
+- repeat 2: on hit@5 0.733, changed vs repeat 1: none
+- repeat 3: on hit@5 0.733, changed vs repeat 1: none
+
+### Answers (fact checklist, last turn)
+
+unmeasured (generator: vllm:/models/gpt-oss-20b unreachable (RuntimeError))
+
+### Shipping rule conditions
+
+- (a) gain > band, strictly: failed; gain 10.0 points, band 10.0 points (n = 30)
+- (b) net >= 3: passed; net 3 (wins 6, losses 3)
+- (c) no standalone_in_conversation loss: failed; 1 standalone items lost
+- (d) regression arm identical with zero rewriter calls: passed; identical yes, rewriter calls 0
+- (e) fallbacks <= 10% of rewriter calls: passed; 1 fallbacks of 28 rewriter calls
+- (f) every item approved: failed; some items are not approved
+
+Decision: ships off (failed: a, c, f; provisional: items pending human review)
+
