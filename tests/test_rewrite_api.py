@@ -446,3 +446,40 @@ def test_a_topic_switch_starts_a_clean_history(tmp_path):
     conversation = trace_of(service, doc_id, third).config["conversation"]
     assert conversation["history_turns"] == 1 and conversation["dropped_turns"] == 1
     assert "topic_start" not in stored(path)["turns"][2]
+
+
+NAMED_BAD_REWRITES = {  # the four named failure modes of RWR-04 and D-08: (message, rewriter line, reason)
+    "invented_details": (
+        "and how does that handle failures?",
+        "REWRITE: How does Raft replication handle 5 failures in Zookeeper?", "invented_detail"),
+    "dropped_constraints": (
+        "and how does that compare to Paxos only for reads in 2020?",
+        "REWRITE: How does Raft replication compare to Paxos?", "dropped_constraint"),
+    "wrong_pronoun": (
+        "and how does that compare to the other one?",
+        "REWRITE: How does Raft replication compare to Multi Zookeeper?", "invented_detail"),
+    "topic_leak": (
+        "Tell me about Berlin latency in cities today",
+        "REWRITE: Tell me about Berlin latency in cities today with Raft replication", "topic_leak"),
+}
+
+
+@pytest.mark.parametrize("case", list(NAMED_BAD_REWRITES))
+def test_the_four_named_bad_rewrites_fall_back_through_the_service(tmp_path, case):
+    message, line, reason = NAMED_BAD_REWRITES[case]
+    service, seen = rewrite_service(tmp_path, line)
+    doc_id = add_document(service, REPLICATION, name="raft.pdf")
+    cid = seed_turns(service, "local", [doc_id], [doc_id], [RAFT_TURN])
+    response = client_for(service).post(f"/v1/documents/{doc_id}/ask",
+                                        json={"question": message, "conversation_id": cid})
+    assert response.status_code == 200
+    body = response.json()
+    assert body["answer"]
+    assert body["rewrite"] == {"status": "fallback", "reason": reason, "rewritten_question": None}
+    assert len(seen) == 1
+    trace = trace_of(service, doc_id, body)
+    assert trace.question == message
+    rejected = line[len("REWRITE:"):].strip()
+    assert trace.config["conversation"]["fallback_reason"] == reason
+    assert trace.config["conversation"]["rejected_question"] == rejected
+    assert rejected not in response.text  # A11: kept for diagnosis in the trace only
