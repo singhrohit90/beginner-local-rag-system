@@ -86,6 +86,7 @@ from rag.observe.retrieval_quality.metrics import score_hits, strict_trace
 from rag.query.configs import CONFIGS, RetrievalConfig
 from rag.query.history import HistoryTurn, window
 from rag.query.pipeline import RetrievalPipeline
+from rag.query.rewrite import RewriteResult, needs_rewrite, rewrite_question
 
 logger = logging.getLogger("rag.experiments.conversation")
 
@@ -105,6 +106,19 @@ MIN_NET_WINS = 3
 MAX_FALLBACK_RATE = 0.10
 PREFLIGHT_TOKENS = 1
 NAME_PATTERN = re.compile(r"[A-Za-z0-9_.-]+")
+
+
+class CallCounter:
+    """Wraps an LLM and counts its generate calls, so a run can prove the gate made no call."""
+
+    def __init__(self, llm: Any):
+        self._llm = llm
+        self.name = getattr(llm, "name", "unknown")
+        self.calls = 0
+
+    def generate(self, system: str, user: str, **kwargs: Any) -> Any:
+        self.calls += 1
+        return self._llm.generate(system, user, **kwargs)
 
 
 def teacher_history(item: GoldConversation) -> List[HistoryTurn]:
@@ -138,6 +152,63 @@ def score_query(
     )
 
 
+def rewrite_for(
+    rewriter: Any, message: str, win: Sequence[HistoryTurn], allow_clarify: bool = True,
+) -> Tuple[RewriteResult, bool]:
+    """The shipped gate, then the shipped rewriter when the gate fires. Returns (result, gate fired)."""
+    fired = needs_rewrite(message, win)
+    if not fired:
+        return RewriteResult(status="skipped", question=message), False
+    return rewrite_question(rewriter, message, win, allow_clarify=allow_clarify, doc_names=list(DOC_NAMES)), True
+
+
+def effective_query(message: str, result: RewriteResult) -> Optional[str]:
+    """What retrieval runs on: nothing after a clarify, else the result's question (the raw message unless
+    rewritten, which is what the service does)."""
+    if result.status == "clarify":
+        return None
+    return result.question
+
+
+def score_clarify(
+    rewriter: Any, item: GoldConversation, win: Sequence[HistoryTurn], first: RewriteResult,
+) -> Dict[str, Any]:
+    """A clarify item: did it ask, did the question name both candidates, and does the turn after the
+    clarification avoid a second clarify (never two in a row)."""
+    asked = first.status == "clarify"
+    named_both = asked and all(t.lower() in (first.clarify_question or "").lower() for t in item.must_contain)
+    second_status: Optional[str] = None
+    second_clarified: Optional[bool] = None
+    if asked:
+        follow = window(list(win) + [HistoryTurn(item.message, first.clarify_question or "", FIXED_ASKED_AT)])
+        second, _ = rewrite_for(rewriter, item.message, follow, allow_clarify=False)
+        second_status = second.status
+        second_clarified = second_status == "clarify"
+    return {"asked": asked, "named_both": named_both, "second_status": second_status,
+            "second_clarified": second_clarified}
+
+
+def _rewrite_record(item: GoldConversation, result: RewriteResult, fired: bool) -> Dict[str, Any]:
+    query = effective_query(item.message, result)
+    kept = None
+    if item.must_contain and result.status == "rewritten":
+        kept = all(t.lower() in (query or "").lower() for t in item.must_contain)
+    leaked = None
+    if item.must_not_contain and query is not None:
+        leaked = any(t.lower() in query.lower() for t in item.must_not_contain)
+    return {
+        "gate_fired": fired,
+        "status": result.status,
+        "reason": result.reason,
+        "rewritten_question": result.rewritten_question,
+        "rejected_question": result.rejected_question,
+        "clarify_question": result.clarify_question,
+        "elapsed_ms": result.elapsed_ms,
+        "must_contain_kept": kept,
+        "leaked": leaked,
+    }
+
+
 def _new_row(item: GoldConversation) -> Dict[str, Any]:
     return {
         "id": item.id,
@@ -160,13 +231,31 @@ def run_arms(
     for arm in arms:
         if arm not in ARMS:
             raise ValueError(f"unknown arm {arm!r}")
+    if "on" in arms and rewriter is None:
+        raise ValueError("the on arm needs a rewriter")
     rows: List[Dict[str, Any]] = []
     traces: Dict[Tuple[str, str], Trace] = {}
     for item in items:
         row = _new_row(item)
+        win = window(teacher_history(item))
         queries = {"off": item.message, "oracle": item.standalone, "concat": concat_query(item)}
         for arm in arms:
             if arm == "on":
+                result, fired = rewrite_for(rewriter, item.message, win)
+                row["rewrite"] = _rewrite_record(item, result, fired)
+                if item.expect != "answer":
+                    row["arms"]["on"] = None
+                    row["clarify"] = score_clarify(rewriter, item, win, result)
+                    continue
+                query = effective_query(item.message, result)
+                if query is None:  # a false clarify: the user got no answer, so on_i = 0 (D-07)
+                    row["arms"]["on"] = {"query": None, "hit@5": 0.0, "mrr": 0.0, "recall@5": 0.0,
+                                         "chunk_ids": [], "false_clarify": True}
+                    continue
+                score, trace = score_query(pipeline, config, f"{item.id}__on", query, item.gold_pages,
+                                           item.evidence_terms)
+                row["arms"]["on"] = dict(score, false_clarify=False)
+                traces[(item.id, "on")] = trace
                 continue
             if item.expect != "answer":
                 row["arms"][arm] = None  # clarify items have no gold pages and never enter a hit@5 mean
@@ -192,6 +281,17 @@ def check_set_summary(rows: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
         "oracle_misses": [i["id"] for i in items if i["oracle"] == 0],
         "controls": [i["id"] for i in items if i["off"] == i["oracle"]],
     }
+
+
+def preflight(llm: Any) -> Optional[str]:
+    """One tiny call before a live arm. None when the model answered, else the exception class name, so an
+    unreachable model skips its arm instead of recording 100% fallbacks (D-14)."""
+    try:
+        llm.generate("Reply with one word.", "ok", max_output_tokens=PREFLIGHT_TOKENS)
+        return None
+    except Exception as err:  # boundary: an unreachable model must skip the arm, not crash the run
+        logger.warning("preflight failed: %s", type(err).__name__)
+        return type(err).__name__
 
 
 def report_dir(name: Optional[str]) -> Path:
@@ -262,10 +362,24 @@ def main() -> None:
         print(f"oracle misses {len(summary['oracle_misses'])}")
         write_report({"meta": meta, "check_set": summary, "rows": rows}, out_dir)
     else:
-        arms = [a.strip() for a in args.arms.split(",") if a.strip() and a.strip() != "on"]
-        rows, _ = run_arms(pipeline, config, items, arms)
+        arms = [a.strip() for a in args.arms.split(",") if a.strip()]
+        arms_not_run: Dict[str, str] = {}
+        rewriter: Any = None
+        if "on" in arms:
+            from rag.common.llm import get_llm  # imported here so the pure functions above load without a backend
+
+            # No disk cache: repeats must be real draws and no rewriter text outlives the run.
+            raw = get_llm(args.rewriter, cache_dir=None)
+            reason = preflight(raw)
+            if reason is not None:
+                arms = [a for a in arms if a != "on"]
+                arms_not_run["on"] = f"rewriter {args.rewriter} unreachable ({reason})"
+                print(f"arm skipped: model unreachable: on (rewriter {args.rewriter}: {reason})")
+            else:
+                rewriter = CallCounter(raw)
+        rows, _ = run_arms(pipeline, config, items, arms, rewriter)
         print(f"arms run: {','.join(arms)}")
-        write_report({"meta": meta, "arms_not_run": {}, "rows": rows}, out_dir)
+        write_report({"meta": meta, "arms_not_run": arms_not_run, "rows": rows}, out_dir)
     print(f"written to {out_dir}")
 
 
