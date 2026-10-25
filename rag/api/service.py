@@ -523,7 +523,14 @@ class DocumentService:
                     "turn": len(turns) + 1, "question": question}
             result, shown_turns = self._rewrite(question, turns, names)
             info["rewrite"] = result
-            trace = retrieval.run(query_id, result.question, CONFIGS[config])  # the effective question (D-10)
+            if result.status == "clarify":
+                # A clarifying question is decided here, before any SSE byte, like every other outcome:
+                # no retrieval, no trace, no answer-model call. The lease stays held; the caller releases it.
+                info["query_id"] = f"clarify-{int(time.time() * 1000)}"
+                info["clarify"] = result.clarify_question
+                info["history_block"] = ""
+                return None, None, info
+            trace =retrieval.run(query_id, result.question, CONFIGS[config])  # the effective question (D-10)
             block = render_block(shown_turns)  # rendered after the rewrite decision (D-14)
             info["history_block"] = block
             if block:
@@ -587,12 +594,35 @@ class DocumentService:
             "seconds": round(time.perf_counter() - started, 2),
         }
 
+    def _clarify_response(self, info: Dict[str, Any]) -> Dict[str, Any]:
+        """The normal response shape for a clarifying question, built from info only: there is no trace
+        and no context stage. The text passes the same output filter as every other answer."""
+        checked = filter_output(info["clarify"], "")
+        return {
+            "query_id": info["query_id"],
+            "conversation_id": info["conversation"].id,
+            "turn": info["turn"],
+            "kind": "clarify",
+            "rewrite": info["rewrite"].as_response(),
+            "answer": checked.answer,
+            "abstained": False,
+            "blocked": checked.reasons,
+            "citations": [],
+            "documents": [{"id": doc_id, "name": name} for doc_id, name in info["names"].items()],
+            "passages": [],
+            "skipped_by_scanner": [],
+            "stages": [],
+            "llm": self.rewrite_llm.name,  # the model that wrote the question
+            "seconds": round(time.perf_counter() - info["started"], 2),
+        }
+
     def _remember(self, trace, info: Dict[str, Any], result: Dict[str, Any]) -> None:
         """Store the turn as the caller saw it, then free the conversation. Called only on the success
         path, before the answer is returned or the final event is yielded (D-09, D-10); it runs whether
         or not keep_traces is on, because the history is what the next question needs (D-11)."""
         turn = new_turn(info["question"], result["answer"], list(info["names"]), info["query_id"],
-                        rewritten=info["rewrite"].rewritten_question)
+                        rewritten=info["rewrite"].rewritten_question, kind=result.get("kind", "answer"),
+                        topic_start=info["rewrite"].status == "new_topic")
         try:
             self.conversations.append_turn(info["conversation"], turn, self._alive)
         finally:
@@ -605,6 +635,10 @@ class DocumentService:
         starts a new conversation; the response carries its id and the turn number."""
         rag, trace, info = self._retrieve(owner, doc_ids, question, config, style, conversation_id)
         try:
+            if trace is None:  # a clarifying question: stored as a turn, nothing retrieved or answered
+                result = self._clarify_response(info)
+                self._remember(None, info, result)
+                return result
             rag.answer(trace, history_block=info["history_block"])
             result = self._describe(trace, info)
             self._remember(trace, info, result)
@@ -625,8 +659,22 @@ class DocumentService:
 
         Retrieval happens before this returns, so a missing document or a not-ready one, and an unknown,
         busy or full conversation, raises here, not part-way through a stream. Closing the returned
-        iterator stops the model."""
+        iterator stops the model. A clarifying question arrives as one final event with "kind"
+        "clarify" and no token events."""
         rag, trace, info = self._retrieve(owner, doc_ids, question, config, style, conversation_id)
+        if trace is None:  # a clarifying question, decided before any SSE byte
+            try:
+                result = self._clarify_response(info)
+                result["replace"] = False
+                self._remember(None, info, result)
+            finally:
+                info["lease"].release()
+
+            def clarified() -> Iterator[Dict[str, Any]]:
+                # a generator, not a list iterator: the route's frames() calls close() on what it gets
+                yield {"event": "final", "data": result}
+
+            return clarified()
         lease = info["lease"]
         stream = rag.stream(trace, history_block=info["history_block"])  # a generator: creating it runs nothing
 
