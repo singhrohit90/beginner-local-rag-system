@@ -117,6 +117,14 @@ def to_history_turns(turns: Sequence[Dict[str, Any]]) -> List[HistoryTurn]:
     ]
 
 
+def since_topic_start(turns: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Stored turns from the most recent turn marked topic_start (inclusive); all turns when none is."""
+    for i in range(len(turns) - 1, -1, -1):
+        if turns[i].get("topic_start"):
+            return list(turns[i:])
+    return list(turns)
+
+
 @dataclass(frozen=True)
 class Conversation:
     """A conversation as opened for one request; `doc_ids` is the declared scope (empty for all documents)."""
