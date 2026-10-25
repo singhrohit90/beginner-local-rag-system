@@ -102,6 +102,7 @@
           <option value="dense">dense only</option>
           <option value="bm25">keyword only</option>
         </select>
+        <button type="button" id="newconv" title="Start a new conversation">New conversation</button>
         <button class="primary" type="submit" id="send" disabled>Ask</button>
       </div>
     </form>
@@ -118,6 +119,9 @@
 const $ = (id) => document.getElementById(id);
 let docs = [], selected = null, answers = {}, poll = null, ready = false;
 const checked = new Set();
+let conversationId = null, epoch = 0, inflight = null;  // the id the server gave this conversation; how many times the page started over; the running ask's AbortController
+const CONV_GONE = "no such conversation";  // the server's one 404 body for every unusable conversation id
+const DETAIL_HINT = $("detail").textContent;
 
 function el(tag, props = {}, ...kids) {
   const node = document.createElement(tag);
@@ -131,7 +135,7 @@ async function api(path, options) {
   if (!res.ok) {
     let detail = res.statusText;
     try { detail = (await res.json()).detail || detail; } catch (_) {}
-    throw new Error(`${res.status}: ${typeof detail === "string" ? detail : JSON.stringify(detail)}`);
+    throw httpError(res.status, detail);
   }
   return res.status === 204 ? null : res.json();
 }
@@ -151,6 +155,42 @@ function longText(text, limit = 240) {
 
 function showError(message) { $("error").replaceChildren(message ? longText(message) : ""); }
 
+// One place builds an HTTP error, keeping its status and detail; the two conversation 409s read as sentences.
+function httpError(status, detail) {
+  const text = typeof detail === "string" ? detail : JSON.stringify(detail);
+  const message = status === 409 && text.includes("conversation is full") ? text + " Use the New conversation button."
+    : status === 409 && text.includes("conversation is busy") ? text : `${status}: ${text}`;
+  const err = new Error(message);
+  err.status = status; err.detail = text;
+  return err;
+}
+
+// Start over: the next question carries no id; a running ask is cancelled and its late result is ignored.
+function resetConversation() {
+  epoch++;
+  conversationId = null;
+  if (inflight) { inflight.abort(); inflight = null; }
+  $("log").replaceChildren();
+  $("detail").replaceChildren(DETAIL_HINT);
+  showError("");
+  updateChat();
+}
+
+// The content route; the conversation id goes only to it.
+async function askContent(question, ids, signal, onText, onNote) {
+  const body = { question, doc_ids: ids, config: $("config").value };
+  if (conversationId) body.conversation_id = conversationId;
+  const sent = body.conversation_id;
+  try { return await streamAsk("/v1/ask/stream", body, onText, signal); }
+  catch (err) { if (!(sent && err.status === 404 && err.detail === CONV_GONE)) throw err; }
+  // The server no longer knows the id, so the page starts again, once; a 404 arrives before any SSE byte,
+  // so nothing was stored or generated. The resend carries no id, so it cannot come back here.
+  conversationId = null;
+  onNote("Started a new conversation (the previous one is no longer available).");
+  delete body.conversation_id;
+  return streamAsk("/v1/ask/stream", body, onText, signal);
+}
+
 async function refresh() {
   docs = await api("/v1/documents");
   const box = $("docs"); box.replaceChildren();
@@ -163,11 +203,17 @@ async function refresh() {
     node.onclick = () => select(d.id);
     if (d.state === "ready") {
       const pick = el("input", { type: "checkbox", checked: checked.has(d.id), title: "Include in questions over checked documents" });
-      pick.onclick = (e) => { e.stopPropagation(); if (pick.checked) checked.add(d.id); else checked.delete(d.id); updateChat(); };
+      pick.onclick = (e) => { e.stopPropagation(); if (pick.checked) checked.add(d.id); else checked.delete(d.id); if ($("scope").value === "checked") resetConversation(); updateChat(); };
       node.prepend(pick);
     }
     const del = el("button", { textContent: "Delete", title: "Delete this document" });
-    del.onclick = async (e) => { e.stopPropagation(); await api("/v1/documents/" + d.id, { method: "DELETE" }); if (selected === d.id) selected = null; checked.delete(d.id); refresh().then(updateChat); };
+    del.onclick = async (e) => {
+      e.stopPropagation();
+      const ids = targets(), touches = ids === null ? d.state === "ready" : ids.includes(d.id);  // membership before the request
+      await api("/v1/documents/" + d.id, { method: "DELETE" });
+      if (touches) resetConversation();
+      if (selected === d.id) selected = null; checked.delete(d.id); refresh().then(updateChat);
+    };
     node.append(el("div", {}, del));
     box.append(node);
   }
@@ -180,8 +226,9 @@ function schedulePoll() {
   poll = setTimeout(() => refresh().then(updateChat).catch((err) => { showError(err.message); schedulePoll(); }), 2000);
 }
 
-// Choosing another document keeps the conversation: each question says which documents it went to.
-function select(id) { selected = id; refresh().then(updateChat); }
+// Under "this document" another document is another conversation, so the page starts afresh; under the other
+// scopes a click only highlights a row and the conversation goes on.
+function select(id) { if ($("scope").value === "one" && id !== selected) resetConversation(); selected = id; refresh().then(updateChat); }
 
 function scopeLabel() {
   const scope = $("scope").value, d = docs.find((x) => x.id === selected);
@@ -206,8 +253,9 @@ function updateChat() {
   $("config").disabled = $("mode").value === "about";  // retrieval settings do not apply to profiles
   $("question").placeholder = !ready ? "Loading the models..." : can ? "Ask a question (Enter sends, Shift+Enter adds a line)" : scope === "checked" ? "Tick at least one ready document" : d && d.state !== "ready" ? "Document is " + d.state + "..." : "Select a document first";
 }
-$("scope").onchange = updateChat;
+$("scope").onchange = () => resetConversation();
 $("mode").onchange = updateChat;
+$("newconv").onclick = () => resetConversation();
 $("question").onkeydown = (e) => {  // Enter sends, Shift+Enter makes a new line
   if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); if (!$("send").disabled) $("ask").requestSubmit(); }
 };
@@ -217,7 +265,9 @@ $("upload").onsubmit = async (e) => {
   const form = new FormData();
   form.append("file", $("file").files[0]); form.append("chunker", $("chunker").value);
   try {
-    const d = await api("/v1/documents", { method: "POST", body: form }); selected = d.id; $("file").value = "";
+    const d = await api("/v1/documents", { method: "POST", body: form });
+    if ($("scope").value === "one" && selected !== d.id) resetConversation();
+    selected = d.id; $("file").value = "";
     if (d.duplicate) showError(`You already uploaded this file as "${d.name}", so it was selected instead of indexed again.`);
   }
   catch (err) { showError(err.message); }
@@ -226,12 +276,12 @@ $("upload").onsubmit = async (e) => {
 
 // Asks a question and reads the answer as server-sent events: "token" events carry text that has passed the
 // server's stream guard, "final" carries the checked answer and everything else, "error" a failure part-way.
-async function streamAsk(path, body, onText) {
-  const res = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+async function streamAsk(path, body, onText, signal) {
+  const res = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body), signal });
   if (!res.ok) {  // a problem found before streaming starts is an ordinary HTTP error
     let detail = res.statusText;
     try { detail = (await res.json()).detail || detail; } catch (_) {}
-    throw new Error(`${res.status}: ${typeof detail === "string" ? detail : JSON.stringify(detail)}`);
+    throw httpError(res.status, detail);
   }
   const reader = res.body.getReader(), decoder = new TextDecoder();
   let buffer = "", final = null;
@@ -257,6 +307,7 @@ $("ask").onsubmit = async (e) => {
   e.preventDefault(); showError("");
   const question = $("question").value.trim(); const ids = targets(); if (!question || (ids !== null && !ids.length)) return;
   $("question").value = ""; $("send").disabled = true;
+  const mine = epoch, ctl = new AbortController(); inflight = ctl;
   const asked = el("div", { class: "msg q" }, question, el("br"), el("small", { class: "meta" }, "asked of: " + scopeLabel()));
   $("log").append(asked);
   try {
@@ -268,11 +319,13 @@ $("ask").onsubmit = async (e) => {
     let r;
     try {
       if (about) {
-        r = await api("/v1/ask-about", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ question, doc_ids: ids }) });
+        r = await api("/v1/ask-about", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ question, doc_ids: ids }), signal: ctl.signal });
       } else {
-        r = await streamAsk("/v1/ask/stream", { question, doc_ids: ids, config: $("config").value }, (text) => { shown.data += text; msg.scrollIntoView({ block: "nearest" }); });
+        r = await askContent(question, ids, ctl.signal, (text) => { shown.data += text; msg.scrollIntoView({ block: "nearest" }); },
+                             (note) => msg.before(el("div", { class: "meta" }, note)));
       }
     } catch (err) {
+      if (mine !== epoch) return;  // a superseded ask leaves the cleared log alone
       // One bubble for the question's failure: the partial text (if any), a tag, and the reason, with the
       // reason folded behind "more" when it is long.
       showError(err.message);
@@ -281,20 +334,25 @@ $("ask").onsubmit = async (e) => {
       msg.scrollIntoView(); checkStatus();
       r = null;
     }
+    if (mine !== epoch) return;
     if (r) {
+      if (!about && r.conversation_id) conversationId = r.conversation_id;
       answers[r.query_id] = r;
       // the checked answer replaces what was streamed (they are the same unless the final check failed)
       msg.replaceChildren(r.answer || "");
+      if (r.kind === "clarify") msg.prepend(el("small", { class: "meta" }, "clarifying question"), el("br"));
       if (r.replace) msg.prepend(el("span", { class: "tag bad" }, "replaced after the final check"), el("br"));
       if (r.blocked.length) msg.prepend(el("span", { class: "tag bad" }, "withheld: " + r.blocked.join(", ")), el("br"));
       if (r.abstained) msg.prepend(el("span", { class: "tag warn" }, "abstained"), el("br"));
-      msg.onclick = () => { document.querySelectorAll(".a").forEach((n) => n.classList.remove("sel")); msg.classList.add("sel"); r.profiles ? detailAbout(r) : detail(r); };
+      msg.onclick = () => { document.querySelectorAll(".a").forEach((n) => n.classList.remove("sel")); msg.classList.add("sel"); r.kind === "clarify" ? detailClarify() : r.profiles ? detailAbout(r) : detail(r); };
       msg.click(); msg.scrollIntoView();
     }
   } catch (err) {
-    showError(err.message);  // a problem while drawing the answer; the question stays in the log
+    if (mine === epoch) showError(err.message);  // a problem while drawing the answer; the question stays in the log
+  } finally {
+    if (inflight === ctl) inflight = null;
+    if (mine === epoch) { $("send").disabled = false; $("question").focus(); }  // a reset already re-enabled Ask
   }
-  $("send").disabled = false; $("question").focus();
 };
 
 // What an "about the documents" answer was based on: each document's profile as the model saw it.
@@ -310,6 +368,11 @@ function detailAbout(r) {
     part.append(el("div", { class: "meta" }, `Opening excerpt (page ${p.opening_page})`), el("pre", {}, p.opening || "(none)"));
     box.append(part);
   }
+}
+
+// A clarification has no passages or stages to show.
+function detailClarify() {
+  $("detail").replaceChildren(el("div", { class: "meta" }, "A clarifying question: no passages were retrieved for it."));
 }
 
 function detail(r) {
