@@ -13,7 +13,9 @@ Where a conversation lives depends on the scope it was declared with (decision D
 
 The owner never appears in a path or a file: it is hashed into `owner_key`. Each file is
 `{"header": {"id", "owner_key", "scope_key", "doc_ids", "created_at", "version": 1}, "turns": [...]}`
-(decision D-07), written through a temporary file and an atomic replace.
+(decision D-07), written through a temporary file and an atomic replace. A stored turn may also carry
+the optional `kind` ("clarify" when the turn was a clarifying question) and `topic_start` (true when
+the turn started a new topic, so earlier turns are left out of later prompts).
 
 Turns are read after the lease is taken and appended under the store lock to the list re-read
 there, so a turn written between `open` and `lease` is neither hidden nor overwritten. Stored text
@@ -41,6 +43,8 @@ CONVERSATION_ID = re.compile(r"[0-9a-f]{32}")  # always used with fullmatch, so 
 DOCUMENT_ID = re.compile(r"[0-9a-f]{12}")  # the same shape as the service's document ids
 CONVERSATIONS_DIR = "_conversations"  # never matches a document id, so the service's folder scans skip it
 FORMAT_VERSION = 1
+# A clarification is stored as a turn so the next turn knows not to clarify again (decision D-13).
+TURN_KINDS = ("answer", "clarify")
 
 
 class NoSuchConversation(Exception):
@@ -76,9 +80,16 @@ def scope_of(doc_ids: Optional[Sequence[str]]) -> Tuple[str, Tuple[str, ...]]:
 
 
 def new_turn(question: str, answer: str, doc_ids: Sequence[str], query_id: str,
-             rewritten: Optional[str] = None) -> Dict[str, Any]:
-    """One stored turn (decision D-09), with the scanner rule names found in the question and the answer."""
-    return {
+             rewritten: Optional[str] = None, kind: str = "answer", topic_start: bool = False) -> Dict[str, Any]:
+    """One stored turn (decision D-09), with the scanner rule names found in the question and the answer.
+
+    `kind` and `topic_start` are written only when they differ from the default, so files and tests
+    from Phase 2 keep their exact shape; readers use `turn.get("kind", "answer")` and
+    `turn.get("topic_start", False)`.
+    """
+    if kind not in TURN_KINDS:
+        raise ValueError(f"unknown turn kind {kind!r}")
+    turn: Dict[str, Any] = {
         "question": question,
         "rewritten": rewritten,
         "answer": answer,
@@ -87,6 +98,11 @@ def new_turn(question: str, answer: str, doc_ids: Sequence[str], query_id: str,
         "query_id": query_id,
         "scan": sorted(set(scan_text(question).rules) | set(scan_text(answer).rules)),
     }
+    if kind != "answer":
+        turn["kind"] = kind
+    if topic_start:
+        turn["topic_start"] = True
+    return turn
 
 
 def to_history_turns(turns: Sequence[Dict[str, Any]]) -> List[HistoryTurn]:
@@ -99,6 +115,14 @@ def to_history_turns(turns: Sequence[Dict[str, Any]]) -> List[HistoryTurn]:
         )
         for turn in turns
     ]
+
+
+def since_topic_start(turns: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Stored turns from the most recent turn marked topic_start (inclusive); all turns when none is."""
+    for i in range(len(turns) - 1, -1, -1):
+        if turns[i].get("topic_start"):
+            return list(turns[i:])
+    return list(turns)
 
 
 @dataclass(frozen=True)
