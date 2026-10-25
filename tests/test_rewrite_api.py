@@ -323,3 +323,66 @@ def test_the_real_ollama_request_for_a_rewrite_is_pinned(tmp_path, monkeypatch):
     assert sorted(payload["options"]) == ["num_ctx", "num_predict", "temperature"]
     assert timeout == 600.0
     assert result["rewrite"]["status"] == "standalone"
+
+
+TWO_NAMES_TURN = ("How do Raft and Paxos elect a leader?", "Both elect a leader by majority vote.")
+CLARIFY_LINE = "CLARIFY: Do you mean Raft or Paxos?"
+# The page reads these from the final event without a guard (rag/api/static/index.html lines 287-326),
+# so a clarifying question must carry every one of them.
+PAGE_KEYS = ("answer", "blocked", "citations", "skipped_by_scanner", "passages", "stages", "llm", "seconds",
+             "abstained", "documents", "query_id", "conversation_id", "turn", "kind", "rewrite")
+
+
+def ask(service, client, doc_id, cid, message, streamed):
+    """Post to the ordinary or the streamed route; returns (status_code, data, frame_names, text), where for a
+    stream data is the last frame's data and frame_names lists every frame."""
+    url = f"/v1/documents/{doc_id}/ask" + ("/stream" if streamed else "")
+    response = client.post(url, json={"question": message, "conversation_id": cid})
+    if response.status_code != 200 or not streamed:
+        return response.status_code, response.json(), [], response.text
+    events = frames(response)
+    return response.status_code, events[-1][1], [name for name, _ in events], response.text
+
+
+@pytest.mark.parametrize("streamed", [False, True], ids=["ordinary", "streamed"])
+def test_a_clarifying_question_uses_the_normal_shape(tmp_path, streamed):
+    llm, asked = recording()
+    service, seen = rewrite_service(tmp_path, CLARIFY_LINE, llm=llm)
+    doc_id = add_document(service, REPLICATION)
+    cid = seed_turns(service, "local", [doc_id], [doc_id], [TWO_NAMES_TURN])
+    client = client_for(service)
+    status, data, names, _ = ask(service, client, doc_id, cid, "how does it handle failures?", streamed)
+    assert status == 200
+    assert all(key in data for key in PAGE_KEYS), [key for key in PAGE_KEYS if key not in data]
+    assert data["kind"] == "clarify" and data["answer"] == "Do you mean Raft or Paxos?"
+    assert data["passages"] == [] and data["citations"] == [] and data["stages"] == []
+    assert data["abstained"] is False and data["blocked"] == [] and data["skipped_by_scanner"] == []
+    assert data["llm"] == service.rewrite_llm.name
+    assert data["query_id"].startswith("clarify-")
+    assert data["conversation_id"] == cid and data["turn"] == 2
+    assert data["rewrite"] == {"status": "clarify", "reason": None, "rewritten_question": None}
+    assert asked == [] and len(seen) == 1  # no answer-model call
+    assert not list((service.root / doc_id / "chat").glob("clarify-*.json"))  # no trace written
+    if streamed:
+        assert names == ["final"] and data["replace"] is False
+        other = seed_turns(service, "local", [doc_id], [doc_id], [TWO_NAMES_TURN])
+        events = list(service.ask_documents_stream("local", [doc_id], "how does it handle failures?",
+                                                   conversation_id=other))
+        assert [event["event"] for event in events] == ["final"]
+
+
+def test_a_clarification_is_stored_with_its_kind(tmp_path):
+    service, seen = rewrite_service(tmp_path, CLARIFY_LINE)
+    doc_id = add_document(service, REPLICATION)
+    service.conversations.max_turns = 2
+    cid = seed_turns(service, "local", [doc_id], [doc_id], [TWO_NAMES_TURN])
+    result = service.ask_documents("local", [doc_id], "how does it handle failures?", conversation_id=cid)
+    assert result["kind"] == "clarify"
+    turn = stored(conversation_file(service, "local", [doc_id], cid))["turns"][1]
+    assert set(turn) == SEVEN_KEYS | {"kind"}
+    assert turn["kind"] == "clarify" and turn["question"] == "how does it handle failures?"
+    assert turn["answer"] == "Do you mean Raft or Paxos?" and turn["rewritten"] is None
+    full = client_for(service).post(f"/v1/documents/{doc_id}/ask",
+                                    json={"question": "Raft, please", "conversation_id": cid})
+    assert full.status_code == 409
+    assert full.json() == {"detail": "this conversation is full; start a new conversation"}
