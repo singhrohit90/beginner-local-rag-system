@@ -458,6 +458,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--llm", default=setting("RAG_LLM", "vllm:/models/gpt-oss-20b"), help="generator spec")
     parser.add_argument("--judge", default=setting("RAG_JUDGE", "ollama:qwen2.5:7b"), help="fact-checklist judge spec")
     parser.add_argument("--workers", type=int, default=4, help="items answered in parallel")
+    parser.add_argument("--results", type=Path, default=None, metavar="RUN_DIR",
+                        help="render results.md from RUN_DIR/report.json (no model, no retrieval)")
+    parser.add_argument("--compare", type=Path, default=None, metavar="RUN_DIR",
+                        help="with --results: a second rewriter's run, chosen between by the D-10 rule")
     return parser
 
 
@@ -848,19 +852,55 @@ def _judge_line(report: Dict[str, Any]) -> str:
     return "no"
 
 
-def _choice(report: Dict[str, Any], compare: Optional[Dict[str, Any]]) -> Dict[str, Any]:
-    spec = report["meta"]["rewriter"]
-    reason = "qwen by default, not compared" if "qwen" in spec else f"{spec} by default, not compared"
-    return {"chosen": spec, "reason": reason}
+def choose_rewriter(first: Dict[str, Any], second: Optional[Dict[str, Any]], band: float) -> Dict[str, Any]:
+    """D-10: a second rewriter wins only by more than the band; inside the band the lower p50 wins (first on a
+    tie, a missing latency counts as slowest)."""
+    if second is None:
+        spec = first["spec"]
+        reason = "qwen by default, not compared" if "qwen" in spec else f"{spec} by default, not compared"
+        return {"chosen": spec, "reason": reason}
+    diff = 100.0 * (second["on_hit@5"] - first["on_hit@5"])
+    if diff > band:
+        return {"chosen": second["spec"], "reason": "on hit@5 higher by more than the band"}
+    if -diff > band:
+        return {"chosen": first["spec"], "reason": "on hit@5 higher by more than the band"}
+    slow = float("inf")
+    p_first = first["p50"] if first["p50"] is not None else slow
+    p_second = second["p50"] if second["p50"] is not None else slow
+    chosen = second["spec"] if p_second < p_first else first["spec"]
+    return {"chosen": chosen, "reason": "inside the band; lower p50 latency"}
+
+
+def _candidate(report: Dict[str, Any]) -> Dict[str, Any]:
+    summary = report["summary"]
+    return {"spec": report["meta"]["rewriter"], "on_hit@5": (summary["arms"].get("on") or {}).get("hit@5") or 0.0,
+            "p50": summary["latency"]["p50"]}
+
+
+def _rule_for(summary: Dict[str, Any], regression: Dict[str, Any], on_run: bool) -> Dict[str, Any]:
+    identical = "identical" in regression and regression["identical"] == regression["n"]
+    return evaluate_rule(summary["n"], summary["wins"], summary["losses"], summary["standalone_losses"], identical,
+                         regression.get("rewriter_calls", 0), summary["fallbacks"], summary["gate_calls"],
+                         summary["all_approved"], on_run=on_run)
 
 
 def render_results(report: Dict[str, Any], compare: Optional[Dict[str, Any]] = None) -> str:
     """The section plan 04-08 appends below the rule: counts, rates, reason codes and ids only, never model
-    text, so nothing a model wrote reaches the committed file."""
+    text, so nothing a model wrote reaches the committed file. With a compare report the rewriter is chosen by
+    the pre-registered D-10 rule, and the shipping rule is evaluated on the chosen rewriter's run with the first
+    report's regression and approval state."""
     meta, summary = report["meta"], report["summary"]
-    choice = _choice(report, compare)
     rule = report["rule"]
     chosen = summary
+    if compare is None:
+        choice = choose_rewriter(_candidate(report), None, summary["band"])
+    else:
+        choice = choose_rewriter(_candidate(report), _candidate(compare), summary["band"])
+        if choice["chosen"] == compare["meta"]["rewriter"] and choice["chosen"] != meta["rewriter"]:
+            chosen = dict(compare["summary"], pending=summary["pending"], all_approved=summary["all_approved"],
+                          items=summary["items"], regression=summary["regression"],
+                          regression_unrelated=summary["regression_unrelated"])
+            rule = _rule_for(chosen, summary["regression"], on_run="on" not in compare.get("arms_not_run", {}))
     lines: List[str] = ["## Results", ""]
     command = meta["command"] + (f"; compare: {compare['meta']['command']}" if compare else "")
     rewriters = meta["rewriter"] + (f"; compare: {compare['meta']['rewriter']}" if compare else "")
@@ -875,6 +915,16 @@ def render_results(report: Dict[str, Any], compare: Optional[Dict[str, Any]] = N
               _regression_line(summary), review)
     for label, value in zip(RESULT_LABELS[:-1], values):
         lines.append(f"{label} {value}")
+        lines.append("")
+    if compare is not None:
+        lines += ["### Rewriter comparison", "",
+                  "| rewriter | on hit@5 | p50 ms | p95 ms | fallbacks | reasoning effort |",
+                  "|----------|----------|--------|--------|-----------|------------------|"]
+        for r in (report, compare):
+            s = r["summary"]
+            lines.append(f"| {r['meta']['rewriter']} | {_fmt((s['arms'].get('on') or {}).get('hit@5'))} | "
+                         f"{_fmt(s['latency']['p50'], 1)} | {_fmt(s['latency']['p95'], 1)} | {s['fallbacks']} | "
+                         f"{r['meta']['reasoning_effort']} |")
         lines.append("")
     lines += ["### Arms (answer items, strict evidence-aware retrieval)", "",
               "| arm | n | hit@5 | mrr | recall@5 |", "|-----|---|-------|-----|----------|"]
@@ -1010,6 +1060,15 @@ def main() -> None:
         if not (status["committed"] and status["unchanged"] and not status["first_has_results"]):
             raise SystemExit(1)
         return
+    if args.results is not None:
+        report = json.loads((args.results / "report.json").read_text(encoding="utf-8"))
+        compare = None
+        if args.compare is not None:
+            compare = json.loads((args.compare / "report.json").read_text(encoding="utf-8"))
+        text = render_results(report, compare)
+        (args.results / "results.md").write_text(text, encoding="utf-8")
+        print(text)
+        return
     out_dir = report_dir(args.name)
     arms = [a.strip() for a in args.arms.split(",") if a.strip()]
     status = rule_status()  # captured once, before any arm runs; the report records what the guard checked
@@ -1118,10 +1177,7 @@ def _decide(report: Dict[str, Any], arms: Sequence[str]) -> None:
     """Summary, rule verdict and decision line from repeat 1, stored in the report."""
     regression = report["regression"]
     summary = summarise(report["rows"], regression, report["regression_unrelated"])
-    identical = "identical" in regression and regression["identical"] == regression["n"]
-    rule = evaluate_rule(summary["n"], summary["wins"], summary["losses"], summary["standalone_losses"], identical,
-                         regression.get("rewriter_calls", 0), summary["fallbacks"], summary["gate_calls"],
-                         summary["all_approved"], on_run="on" not in report["arms_not_run"] and "on" in arms)
+    rule = _rule_for(summary, regression, on_run="on" not in report["arms_not_run"] and "on" in arms)
     report["summary"] = summary
     report["rule"] = rule
     report["decision"] = {"ship_on": rule["ship_on"], "line": decision_line(rule, summary["pending"])}
