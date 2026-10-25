@@ -27,10 +27,9 @@ HISTORY_BLOCK_MAX_WORDS = 400  # words in the whole rendered block, header and l
 HISTORY_ANSWER_MAX_WORDS = 40  # words kept from each earlier answer
 HISTORY_QUESTION_MAX_WORDS = 60  # words kept from each earlier question
 CONVERSATION_MAX_TURNS = 50  # stored turns per conversation; Phase 2 refuses the next turn past it
+CONVERSATION_MAX_STORED_WORDS = 20000  # question plus answer words stored per conversation; next turn refused at cap
 TOKENS_PER_WORD = 1.5  # estimate, not measured; Phase 2 calibrates it from usage.prompt_tokens
-# floor, not a measurement: max_model_len was not read in Phase 1 (docs/models.md, Context window);
-# replace it with the recorded number at the start of Phase 2 (D-11, D-13)
-MODEL_CONTEXT_TOKENS = 8192
+MODEL_CONTEXT_TOKENS = 8192  # a floor, not a measurement (docs/models.md, Context window)
 THINKING_TOKENS = 3000  # thinking budget the client adds to every answer request (docs/models.md, Generator row)
 ANSWER_TOKENS = 600  # max_output_tokens of an answer (rag/query/generate.py, rag/query/pipeline.py)
 
@@ -107,6 +106,15 @@ def render_block(turns: Sequence[HistoryTurn]) -> str:
             return block
         kept = kept[1:]
     return ""
+
+
+def block_turns(block: str) -> int:
+    """How many turns a render_block output holds: the inverse of its shape (header, one User and
+    one Assistant line per turn, blank line), so a caller can report how many turns reached the
+    prompt (D-13) without knowing the layout. "" holds 0."""
+    if not block:
+        return 0
+    return (len(block.splitlines()) - 2) // 2
 
 
 def estimate_prompt_tokens(system: str, user: str) -> int:
