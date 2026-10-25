@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Optional
 import pytest
 
 import rag.experiments.conversation as conversation
+from rag.api.main import build_default_service
 from rag.common.config import RUNS_DIR
 from rag.common.embed import HashingEmbedder
 from rag.common.llm import FakeLLM
@@ -30,6 +31,7 @@ from rag.query.history import HISTORY_HEADER, render_block, window
 from rag.query.pipeline import RagPipeline, RetrievalPipeline
 from rag.query.prompt import ABSTAIN
 from tests.test_about_experiment import fake_judge
+from tests.test_rewrite_api import spied_settings
 
 PAGES = [
     Page(1, "Cats chase mice around the garden every single morning. " * 12),
@@ -542,3 +544,38 @@ def test_the_results_text_holds_no_model_text():
     assert last.startswith("Decision: ships off") and "provisional: items pending human review" in last
     assert sum(1 for line in lines if line.startswith("Decision:")) == 1
     assert marker not in text
+
+
+DOC = Path(conversation.ROOT) / RULE_PATH
+
+
+def recorded(label: str) -> str:
+    """The rest of the first line of the committed Results section that starts with label, stripped."""
+    text = DOC.read_text(encoding="utf-8")
+    assert "## Results" in text, "docs/chat_memory_eval.md has no Results section"
+    for line in text.split("## Results", 1)[1].splitlines():
+        if line.startswith(label):
+            return line[len(label):].strip()
+    raise AssertionError(f"no {label!r} line in the Results section")
+
+
+def test_the_default_matches_the_recorded_decision(monkeypatch, tmp_path):
+    on = recorded("Decision:").startswith("ships on")
+    built = spied_settings(monkeypatch, tmp_path)
+    service = build_default_service()
+    assert service.rewrite is on, recorded("Decision:")
+    assert built and all(cache_dir is None for _, cache_dir in built), built
+
+
+def test_the_results_file_records_every_decision():
+    results = DOC.read_text(encoding="utf-8").split("## Results", 1)[1]
+    lines = results.splitlines()
+    for label in RESULT_LABELS:
+        assert any(line.startswith(label) for line in lines), label
+    assert [line for line in lines if line.strip()][-1].startswith("Decision: ships")
+    assert recorded("Question slot:").startswith(("rewritten question", "original message"))
+    assert recorded("Judge and rewriter are the same model:").startswith(("yes", "no", "not applicable"))
+    commit = recorded("Rule commit:")
+    assert len(commit) == 40 and all(c in "0123456789abcdef" for c in commit), commit
+    if shutil.which("git"):
+        assert commit == rule_status()["rule_commit"]
