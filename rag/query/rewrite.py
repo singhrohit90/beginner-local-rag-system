@@ -170,6 +170,99 @@ def parse_reply(text: str) -> Tuple[str, str]:
     return (tag, payload) if payload else ("empty", "")
 
 
+_NUM = re.compile(r"\d+(?:[.,]\d+)*")
+_QUOTED = re.compile(r"\"([^\"]+)\"|“([^”]+)”")  # double quotes only; apostrophes are not quotes
+_CONSTRAINT = re.compile(r"\b(only|excluding|except|not|without|before|after|between)\b")
+_NOT = re.compile(r"n['’]t\b")
+_NAME = re.compile(r"\b[A-Z][A-Za-z0-9]*\b")
+_STARTERS = frozenset(
+    "how what why which who whom when where does do did is are was were can could should would will "
+    "compare contrast explain describe tell give list show summarize define and but or also then in "
+    "on for with between versus using the a an so if since while".split())
+
+
+def _numbers(text: str) -> Set[str]:
+    """The numbers in the text, with thousands commas removed and a trailing dot stripped, so "2,000"
+    and "2000" are equal."""
+    return {match.replace(",", "").rstrip(".") for match in _NUM.findall(text)}
+
+
+def _norm(text: str) -> str:
+    """Lower-cased, with n't turned into " not", so "doesn't" and "does not" both carry "not"."""
+    return _NOT.sub(" not", text.lower())
+
+
+def _vocab(text: str) -> Set[str]:
+    return set(tokenize(text, drop_stopwords=False))  # the retriever's own tokenizer, no second one
+
+
+def _sentence_start(text: str, start: int) -> bool:
+    before = text[:start]
+    stripped = before.rstrip()
+    return not stripped or (len(stripped) < len(before) and stripped[-1] in ".!?")
+
+
+def check_text(kind: str, text: str, message: str, shown: str) -> Optional[str]:
+    """None when the model's text may be used, else the reason it may not (D-07). kind is "rewrite" or
+    "clarify"; shown is what the rewriter saw (the Documents line, the history block and the message).
+
+    too_long            more than REWRITE_MAX_WORDS (rewrite) or CLARIFY_MAX_WORDS (clarify) words, or a
+                        rewrite more than REWRITE_EXTRA_WORDS words longer than the message.
+    flagged             the scanner flags it, or filter_output blocks it with no context (instructions,
+                        any URL or image, the canary, a prompt echo).
+    dropped_constraint  (rewrite only) a number, a double-quoted string or one of the words only,
+                        excluding, except, not, without, before, after, between of the message is missing.
+    invented_detail     a number, or a capitalised word other than I or a sentence-initial question or
+                        command word, that is in neither the message nor what the rewriter saw.
+
+    Known limits, not hidden: a wrong pick between two names that are both shown; lowercase invented
+    context ("in distributed databases"); a number spelled out ("three"); a capitalised non-ASCII name
+    (the tokenizer keeps ASCII only); a constraint outside the word list ("the second book"). A false
+    rejection (for example "Multi-Paxos" when only "Paxos" was shown) falls back to the raw message,
+    the safe direction."""
+    if kind not in ("rewrite", "clarify"):
+        raise ValueError(f"unknown kind {kind!r}")
+    words = text.split()
+    limit = REWRITE_MAX_WORDS if kind == "rewrite" else CLARIFY_MAX_WORDS
+    if len(words) > limit or (kind == "rewrite" and len(words) > len(message.split()) + REWRITE_EXTRA_WORDS):
+        return "too_long"
+    if scan_text(text).flagged or filter_output(text, "").blocked:
+        return "flagged"
+    if kind == "rewrite":
+        normal_text, normal_message = _norm(text), _norm(message)
+        kept = " ".join(normal_text.split())
+        if _numbers(message) - _numbers(text):
+            return "dropped_constraint"
+        if any(" ".join((a or b).lower().split()) not in kept for a, b in _QUOTED.findall(message)):
+            return "dropped_constraint"
+        if set(_CONSTRAINT.findall(normal_message)) - set(_CONSTRAINT.findall(normal_text)):
+            return "dropped_constraint"
+    context = shown + " " + message
+    if _numbers(text) - _numbers(context):
+        return "invented_detail"
+    known = _vocab(context)
+    for match in _NAME.finditer(text):
+        word = match.group(0)
+        if word == "I" or (word.lower() in _STARTERS and _sentence_start(text, match.start())):
+            continue
+        if word.lower() not in known:
+            return "invented_detail"
+    return None
+
+
+def leaked(rewrite: str, message: str, window_text: str) -> bool:
+    """D-07 topic_leak. A marker-free message of LEAK_MIN_WORDS to GATE_MIN_WORDS - 1 words reached the
+    model only because it is short; it has nothing to resolve, so content words in its rewrite that
+    come only from the earlier turns are the old topic leaking in. Under LEAK_MIN_WORDS the message is
+    probably elliptical ("Latency?"), and with a marker adding the antecedent is the job, so neither
+    is checked."""
+    if anaphora_markers(message) or len(message.split()) < LEAK_MIN_WORDS:
+        return False
+    in_message = set(tokenize(message))
+    added = set(tokenize(rewrite)) - in_message
+    return bool(added & (set(tokenize(window_text)) - in_message))
+
+
 def _fallback(message: str, reason: str, elapsed_ms: float = 0.0, rejected: Optional[str] = None) -> RewriteResult:
     return RewriteResult("fallback", message, reason=reason, rejected_question=rejected, elapsed_ms=elapsed_ms)
 
@@ -180,6 +273,10 @@ def rewrite_question(
 ) -> RewriteResult:
     """One rewriter call for a message the gate sent on."""
     system, user = build_rewrite_prompt(message, window, allow_clarify, doc_names)
+    if len((system + " " + user).split()) > REWRITE_PROMPT_MAX_WORDS:
+        return _fallback(message, "input_too_long")  # A7: never send a prompt the model would truncate
+    shown = user  # what the rewriter saw: the Documents line, the history block and the message
+    window_text = " ".join(turn.question + " " + turn.answer for turn in window)
     started = time.perf_counter()
     reply = llm.generate(system, user, max_output_tokens=REWRITE_MAX_OUTPUT_TOKENS)
     elapsed_ms = round((time.perf_counter() - started) * 1000, 1)
@@ -187,8 +284,18 @@ def rewrite_question(
     if tag == "STANDALONE":
         return RewriteResult("standalone", message, elapsed_ms=elapsed_ms)
     if tag == "REWRITE":
+        reason = check_text("rewrite", payload, message, shown)
+        if reason is None and leaked(payload, message, window_text):
+            reason = "topic_leak"
+        if reason is not None:
+            logger.info("rewrite rejected: %s", reason)
+            return _fallback(message, reason, elapsed_ms, rejected=payload)
         return RewriteResult("rewritten", payload, rewritten_question=payload, elapsed_ms=elapsed_ms)
     if tag == "CLARIFY":
+        reason = check_text("clarify", payload, message, shown)
+        if reason is not None:
+            logger.info("clarify rejected: %s", reason)
+            return _fallback(message, reason, elapsed_ms)
         return RewriteResult("clarify", message, clarify_question=payload, elapsed_ms=elapsed_ms)
     if tag == "NEW_TOPIC":
         return RewriteResult("new_topic", message, elapsed_ms=elapsed_ms)
