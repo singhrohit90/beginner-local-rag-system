@@ -2,16 +2,20 @@
 rag/query/rewrite.py). Fake models only; a real client is used only with urllib.request.urlopen patched.
 The helpers come from the Phase 2 test module, which is not edited."""
 
+import json
+import urllib.error
+
 import pytest
 
 from rag.api.conversations import new_turn
 from rag.common.embed import HashingEmbedder
-from rag.common.llm import FakeLLM
+from rag.common.llm import FakeLLM, get_llm
 from rag.common.trace import load_trace
 from rag.query.rewrite import REWRITE_SYSTEM_PROMPT
 from tests.test_api import COMPACTION, REPLICATION
 from tests.test_conversations import (add_document, client_for, conversation_file, make_service, recording,
                                       seed_turns, stored)
+from tests.test_ollama import FakeResponse
 from tests.test_stream_api import frames
 
 RAFT_TURN = ("How does replication work in the Raft design?", "Raft keeps copies on several nodes and elects a leader.")
@@ -19,6 +23,16 @@ PRONOUN = "and how does that compare to the other book?"
 OFF = {"status": "off", "reason": None, "rewritten_question": None}
 SEVEN_KEYS = {"question", "rewritten", "answer", "doc_ids", "asked_at", "query_id", "scan"}
 FOUR_KEYS = {"id", "turn", "history_turns", "dropped_turns"}
+FAILURE_SHAPES = {  # case id -> (what the rewriter does, the reason code the caller sees)
+    "refused": (urllib.error.URLError(ConnectionRefusedError()), "unavailable"),
+    "cannot_reach": (RuntimeError("cannot reach the model server at 127.22.10.1:30007"), "unavailable"),
+    "ollama_serve": (RuntimeError("Ollama is not running; start it with ollama serve"), "unavailable"),
+    "timeout_error": (TimeoutError(), "timeout"),
+    "timed_out_text": (RuntimeError("the request timed out"), "timeout"),
+    "empty": ("", "empty"),
+    "prose": ("Sure, here is the standalone question you asked for.", "unparsed"),
+}
+LEAKS = ("127.22.10.1", "ollama serve")  # exception text that must never reach the caller
 
 
 def rewriter(*replies):
@@ -227,3 +241,85 @@ def test_the_streamed_response_has_the_same_rewrite_and_kind_as_the_ordinary_one
     assert final["rewrite"] == body["rewrite"]
     assert body["rewrite"]["status"] == "rewritten"
     assert len(seen) == 2
+
+
+@pytest.mark.parametrize("streamed", [False, True], ids=["ordinary", "streamed"])
+@pytest.mark.parametrize("case", list(FAILURE_SHAPES))
+def test_a_rewriter_failure_is_a_visible_fallback_before_any_sse_byte(tmp_path, case, streamed):
+    reply, reason = FAILURE_SHAPES[case]
+    llm, asked = recording()
+    service, seen = rewrite_service(tmp_path, reply, llm=llm)
+    doc_id = add_document(service, REPLICATION)
+    turn = [("What does replication keep?", "Copies on several nodes.")]
+    fb = {"status": "fallback", "reason": reason, "rewritten_question": None}
+    client = client_for(service)
+    if not streamed:
+        cid = seed_turns(service, "local", [doc_id], [doc_id], turn)
+        response = client.post(f"/v1/documents/{doc_id}/ask", json={"question": "and why that?", "conversation_id": cid})
+        assert response.status_code == 200
+        body = response.json()
+        assert body["rewrite"] == fb and body["answer"]
+        assert len(seen) == 1 and len(asked) == 1
+        trace = trace_of(service, doc_id, body)
+        assert trace.question == "and why that?"
+        assert trace.config["conversation"]["fallback_reason"] == reason
+        assert not any(leak in response.text for leak in LEAKS)
+        return
+    cid = seed_turns(service, "local", [doc_id], [doc_id], turn)
+    events = service.ask_documents_stream("local", [doc_id], "and why that?", conversation_id=cid)
+    assert len(seen) == 1  # the rewrite was decided before the first event was read
+    read = list(events)
+    assert read[-1]["event"] == "final" and read[-1]["data"]["rewrite"] == fb
+    assert not any(event["event"] == "error" for event in read)
+    assert trace_of(service, doc_id, read[-1]["data"]).config["conversation"]["fallback_reason"] == reason
+    other = seed_turns(service, "local", [doc_id], [doc_id], turn)
+    response = client.post(f"/v1/documents/{doc_id}/ask/stream",
+                           json={"question": "and why that?", "conversation_id": other})
+    assert response.status_code == 200
+    names = [name for name, _ in frames(response)]
+    assert names[-1] == "final" and "error" not in names
+    assert frames(response)[-1][1]["rewrite"] == fb
+    assert not any(leak in response.text for leak in LEAKS)
+    assert len(seen) == 2 and len(asked) == 2  # one answer-model call per question
+
+
+def test_a_real_ollama_client_that_is_down_gives_unavailable(tmp_path, monkeypatch):
+    real = get_llm("ollama:qwen2.5:7b", cache_dir=None)
+    service = make_service(tmp_path, rewrite=True, rewrite_llm=real)
+
+    def refuse(request, timeout=None):
+        raise urllib.error.URLError(ConnectionRefusedError())
+
+    monkeypatch.setattr("urllib.request.urlopen", refuse)
+    doc_id = add_document(service, REPLICATION)
+    cid = seed_turns(service, "local", [doc_id], [doc_id], [("What does replication keep?", "Copies on several nodes.")])
+    response = client_for(service).post(f"/v1/documents/{doc_id}/ask",
+                                        json={"question": "and why that?", "conversation_id": cid})
+    assert response.status_code == 200
+    assert response.json()["rewrite"] == {"status": "fallback", "reason": "unavailable", "rewritten_question": None}
+    assert not any(leak in response.text for leak in LEAKS)
+
+
+def test_the_real_ollama_request_for_a_rewrite_is_pinned(tmp_path, monkeypatch):
+    real = get_llm("ollama:qwen2.5:7b", cache_dir=None)
+    service = make_service(tmp_path, rewrite=True, rewrite_llm=real)
+    sent = []
+
+    def capture(request, timeout=None):
+        sent.append((json.loads(request.data), timeout))
+        body = {"message": {"content": "STANDALONE"}, "prompt_eval_count": 40, "eval_count": 2, "done_reason": "stop"}
+        return FakeResponse(json.dumps(body).encode())
+
+    monkeypatch.setattr("urllib.request.urlopen", capture)
+    doc_id = add_document(service, REPLICATION)
+    cid = seed_turns(service, "local", [doc_id], [doc_id], [("What does replication keep?", "Copies on several nodes.")])
+    result = service.ask_documents("local", [doc_id], "and why that?", conversation_id=cid)
+    assert len(sent) == 1
+    payload, timeout = sent[0]
+    assert payload["options"]["temperature"] == 0.0 and payload["options"]["num_predict"] == 120
+    assert "format" not in payload  # no json_mode
+    assert payload["messages"][0] == {"role": "system", "content": REWRITE_SYSTEM_PROMPT}
+    # characterised on the first run (RESEARCH A2): the option keys and the client's timeout
+    assert sorted(payload["options"]) == ["num_ctx", "num_predict", "temperature"]
+    assert timeout == 600.0
+    assert result["rewrite"]["status"] == "standalone"
