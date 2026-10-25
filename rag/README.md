@@ -243,6 +243,8 @@ file again returns the existing document (`duplicate: true`), and a processing d
 
 Answers stream: `POST /v1/ask/stream` and `POST /v1/documents/{id}/ask/stream` return server-sent events (`token` events with text that passed the stream guard, then one `final` event with the whole response, or an `error` event if the model fails part-way). `StreamGuard` (`query/guard.py`) holds back anything that could be the start of a risky piece until it is judged, because text already sent cannot be taken back; if the whole-answer check still fails, the page replaces what it showed. Closing the connection stops the model. Design and reasons: `interview/04_system_design_and_streaming.md`, section 8.
 
+Follow-up questions keep a conversation, because every ask route takes and returns a `conversation_id`; see Step 11.
+
 ## Step 9: vector database (OpenSearch)
 
     docker compose up -d opensearch          # run in WSL; listens on 127.0.0.1:9200 only
@@ -320,3 +322,59 @@ gets a profile (`ingestion/profile.py`: name, pages, contents, the preface) writ
 `query/about.py` answers from the profiles of the chosen documents. It is a separate path that the caller picks
 on the page ("about the documents themselves"); the query pipeline and its prompt are unchanged. The design,
 the alternatives and the safety rules are in `docs/about_the_documents.md`.
+
+## Step 11: chat memory
+
+    POST /v1/ask/stream    {"question": "...", "doc_ids": [...] | null, "conversation_id": "..." | null}
+
+A conversation is the list of turns one owner has asked inside one set of documents. The client sends only the
+new message and the `conversation_id` it was given; it never sends history. A question without an id starts a
+conversation. Every ask route (`/v1/ask`, `/v1/ask/stream`, `/v1/documents/{id}/ask`,
+`/v1/documents/{id}/ask/stream`) takes `conversation_id` and returns it with `turn`, in the body and in the
+`final` event; `/v1/ask-about` stays stateless.
+
+Storage and delete (`rag/api/conversations.py`): a conversation over one document is a file in that document's
+folder, `data/uploads/<doc_id>/chat/conversations/<id>.json`, so deleting the document deletes it. A
+conversation over several or all documents lives under `data/uploads/_conversations/<owner key>/`, and
+`DocumentService.delete` calls `purge_document`, which removes every such conversation whose scope or turns
+named the deleted document. The owner is hashed into the folder name and never written into a file.
+
+History block (`rag/query/history.py`): the last `HISTORY_WINDOW_TURNS = 6` turns go into the answer prompt
+between the passages and the question, each earlier question cut to `HISTORY_QUESTION_MAX_WORDS = 60` words,
+each earlier answer to `HISTORY_ANSWER_MAX_WORDS = 40`, and the whole block to `HISTORY_BLOCK_MAX_WORDS = 400`.
+History is untrusted text: it goes through the same scanner and output filter as passages, and `[S n]` markers
+from earlier answers are removed. A first turn has no history, so its prompt is byte-identical to a single-turn
+prompt; `SYSTEM_PROMPT` is unchanged.
+
+Limits and errors: a conversation holds at most `CONVERSATION_MAX_TURNS = 50` turns and
+`CONVERSATION_MAX_STORED_WORDS = 20000` stored words, and a prompt with history must fit the context estimate
+(`fits_context`; `MODEL_CONTEXT_TOKENS = 8192` is a floor written in the code, the server's real context length
+is not read). An unknown, malformed, another owner's or another scope's id is one 404 "no such conversation";
+a second question while one is being answered is a 409 "conversation is busy, retry when the previous answer is
+finished"; a full conversation is a 409 "this conversation is full; start a new conversation". There is no
+compaction (see `docs/backlog.md`).
+
+Rewriting (`rag/query/rewrite.py`): `RAG_REWRITE=1` turns it on; it is off by default. The rewriter is
+`RAG_REWRITER`, default `ollama:qwen2.5:7b`, called without the LLM disk cache. With it on, a follow-up is
+rewritten into a standalone question before retrieval, an ambiguous one gets one clarifying question
+(`kind: "clarify"`, no passages), a new topic starts a clean history, and a rewriter failure or a rejected
+rewrite falls back to the raw message with `rewrite.status` `fallback`.
+
+The page (`rag/api/static/index.html`) keeps the id between questions; New conversation and any change of the
+target documents start a new one; a 404 for a stored id starts a new one with a notice and asks once more; a
+clarifying question is shown as text.
+
+Measured: on 30 answer items of the multi-turn golden set (`data/golden/ddia_conversations.jsonl`), strict
+evidence-aware hit@5 was 0.633 with rewriting off and 0.733 with it on (mrr 0.461 and 0.592), against 0.867 for
+the hand-written standalone questions; the gain is 10.0 points, the band 10.0 points, with 6 wins and 3 losses
+(sign test p = 0.2539) and one standalone question lost. First turns are unchanged: 37/37 single-turn questions
+gave identical results with zero rewriter calls (hit@5 0.865, mrr 0.663). The rewriter was qwen
+(`ollama:qwen2.5:7b`) by default, not compared with gpt-oss; the answer arm (fact checklist) was not run because
+the generator was unreachable, so the question slot and the judge-versus-rewriter question are not measured.
+The results are provisional: 34 of 34 items are pending human review, and the numbers are provisional until every
+item is approved and the run is repeated. Decision: ships off (failed: a, c, f; provisional: items pending human
+review)
+
+Over-rewriting: with one unrelated earlier turn in front of the 37 single-turn questions (reported, not gating), qwen rewrote 16 of them in the phase gate run (17 in the run the eval file records) and hit@5 changed on 6 of 37 (`.planning/phases/04-multi-turn-evaluation-and-the-default-decision/04-10-SUMMARY.md`). It is not part of the shipping rule.
+
+The rule, the full tables and the command are in `docs/chat_memory_eval.md`.
