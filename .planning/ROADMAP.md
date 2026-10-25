@@ -17,7 +17,7 @@ Scope is the 18 v1 requirements in `.planning/REQUIREMENTS.md`. v2 items stay ou
 Decimal phases appear between their surrounding integers in numeric order.
 
 - [x] **Phase 1: Safety net and prompt seam** - Pin single-turn prompts, retrieval numbers and the test baseline before any shared function is edited (completed 2026-10-25)
-- [ ] **Phase 2: Conversation store and memory in the answer prompt** - Owner-scoped, deletable server-side history that the answer prompt uses, rewrite off
+- [x] **Phase 2: Conversation store and memory in the answer prompt** - Owner-scoped, deletable server-side history that the answer prompt uses, rewrite off (completed 2026-10-25)
 - [ ] **Phase 3: Rewrite, clarify and topic switch** - Standalone-question rewrite before retrieval, one clarifying question, clean history on a topic switch, behind a default-off switch
 - [ ] **Phase 4: Multi-turn evaluation and the default decision** - Multi-turn golden set and an on/off/oracle experiment that sets the rewrite default
 - [ ] **Phase 5: Chat page and honest docs** - Page keeps and resets the conversation, shows clarifying questions, and the docs describe only what was built and measured
@@ -73,35 +73,35 @@ Scope note (not a criterion): this phase also lands the pure history helpers (wi
   4. A stored turn that contains an injected instruction or a stale `[S n]` citation marker reaches the next prompt only after scanning and defanging, with the markers stripped, and streamed answers still reach the client only through `StreamGuard`.
   5. A conversation that reaches the turn or word cap is refused with a clear error status before any model call and before any SSE byte, and a worst-case budget test shows history plus passages plus the 3000 thinking tokens plus the answer budget fits the recorded context window.
 
-**Plans:** 9 plans
+**Plans:** 9/9 plans complete
 
 Plans:
 **Wave 1**
-- [ ] 02-01-PLAN.md — Phase 1 contract check, P2_BASE record, context window in force for Phase 2 (docs/models.md, STATE.md) (wave 1)
+- [x] 02-01-PLAN.md — Phase 1 contract check, P2_BASE record, context window in force for Phase 2 (docs/models.md, STATE.md) (wave 1)
 
 **Wave 2** *(blocked on Wave 1 completion)*
-- [ ] 02-02-PLAN.md — rag/query/history.py: THINKING_TOKENS, ANSWER_TOKENS, CONVERSATION_MAX_STORED_WORDS, estimate_prompt_tokens, fits_context, block_turns (wave 2)
+- [x] 02-02-PLAN.md — rag/query/history.py: THINKING_TOKENS, ANSWER_TOKENS, CONVERSATION_MAX_STORED_WORDS, estimate_prompt_tokens, fits_context, block_turns (wave 2)
 
 **Wave 3** *(blocked on Wave 2 completion)*
-- [ ] 02-03-PLAN.md — rag/api/conversations.py store: D-01 checkpoint (auto owner-folder), owner/scope lookup, lease, caps, atomic writes, delete cascade (wave 3)
+- [x] 02-03-PLAN.md — rag/api/conversations.py store: D-01 checkpoint (auto owner-folder), owner/scope lookup, lease, caps, atomic writes, delete cascade (wave 3)
 
 **Wave 4** *(blocked on Wave 3 completion)*
-- [ ] 02-04-PLAN.md — Wire service.py and main.py: conversation_id on four routes, history block, stored turns, 404/409 mappings, delete under the store lock, budget refusal (wave 4)
+- [x] 02-04-PLAN.md — Wire service.py and main.py: conversation_id on four routes, history block, stored turns, 404/409 mappings, delete under the store lock, budget refusal (wave 4)
 
 **Wave 5** *(blocked on Wave 4 completion; the test plans 02-05 to 02-08 run one per wave because each fail-first proof checks rag/ files out in the shared working tree)*
-- [ ] 02-05-PLAN.md — tests/test_api.py: history window in the trace, one 404 for every miss, 512/513 limit, delete cascade, duplicate ids (wave 5)
+- [x] 02-05-PLAN.md — tests/test_api.py: history window in the trace, one 404 for every miss, 512/513 limit, delete cascade, duplicate ids (wave 5)
 
 **Wave 6** *(blocked on Wave 5 completion)*
-- [ ] 02-06-PLAN.md — tests/test_stream_api.py: id on all four routes, separate conversations, errors before any SSE byte, stored streamed answer (wave 6)
+- [x] 02-06-PLAN.md — tests/test_stream_api.py: id on all four routes, separate conversations, errors before any SSE byte, stored streamed answer (wave 6)
 
 **Wave 7** *(blocked on Wave 6 completion)*
-- [ ] 02-07-PLAN.md — tests/test_conversations.py (new): turn record, stale reads, traces off, cascade, prompts with history, defang, no disk cache (wave 7)
+- [x] 02-07-PLAN.md — tests/test_conversations.py (new): turn record, stale reads, traces off, cascade, prompts with history, defang, no disk cache (wave 7)
 
 **Wave 8** *(blocked on Wave 7 completion)*
-- [ ] 02-08-PLAN.md — tests/test_conversations.py: delete races, busy conversation, lease release paths, caps, oversize follow-up, worst-case budget (wave 8)
+- [x] 02-08-PLAN.md — tests/test_conversations.py: delete races, busy conversation, lease release paths, caps, oversize follow-up, worst-case budget (wave 8)
 
 **Wave 9** *(blocked on Wave 8 completion)*
-- [ ] 02-09-PLAN.md — Phase gate: full suite, retrieval invariant, snapshot, prohibition checks; Phase 2 baseline and D-11 owner flag in STATE.md (wave 9)
+- [x] 02-09-PLAN.md — Phase gate: full suite, retrieval invariant, snapshot, prohibition checks; Phase 2 baseline and D-11 owner flag in STATE.md (wave 9)
 
 **Open decisions**: D1 (cross-document storage), D3 (cap and window numbers); smaller points listed under Open Decisions below.
 
@@ -253,7 +253,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Safety net and prompt seam | 7/7 | Complete    | 2026-10-25 |
-| 2. Conversation store and memory in the answer prompt | 0/TBD | Not started | - |
+| 2. Conversation store and memory in the answer prompt | 9/9 | Complete    | 2026-10-25 |
 | 3. Rewrite, clarify and topic switch | 0/TBD | Not started | - |
 | 4. Multi-turn evaluation and the default decision | 0/TBD | Not started | - |
 | 5. Chat page and honest docs | 0/TBD | Not started | - |

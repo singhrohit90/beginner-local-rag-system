@@ -11,10 +11,10 @@ Requirements for the chat-memory milestone. Each maps to roadmap phases.
 
 ### Conversation identity and history (R1, R2)
 
-- [ ] **CONV-01** (R1): `POST /v1/ask`, `/v1/ask/stream`, `/v1/documents/{id}/ask` and `/v1/documents/{id}/ask/stream` accept an optional `conversation_id`; when it is absent a new conversation is created and its id is returned in the response body and in the `final` SSE event
-- [ ] **CONV-02** (R1): A conversation belongs to the owner from `current_owner`; another owner's id (and an unknown or malformed id) returns 404, never 403, with the same body for every miss (test required)
-- [ ] **CONV-03** (R2): Each turn stores the user's message, the rewritten question (if any), the answer as shown (after the output filter), the document scope and a timestamp
-- [ ] **CONV-04** (R2): History is stored where a document delete removes it: single-document conversations under `data/uploads/<doc_id>/chat/` (in a subfolder so existing `chat/*.json` trace counts are unchanged); cross-document conversations either under a per-owner folder with the cross-document trace retention rule or refused for cross-document scope in this milestone (open decision D1, `.planning/research/SUMMARY.md`); deleting a document removes its conversation history (test required); `get_llm(..., cache_dir=None)` stays for every service LLM including any rewriter
+- [x] **CONV-01** (R1): `POST /v1/ask`, `/v1/ask/stream`, `/v1/documents/{id}/ask` and `/v1/documents/{id}/ask/stream` accept an optional `conversation_id`; when it is absent a new conversation is created and its id is returned in the response body and in the `final` SSE event
+- [x] **CONV-02** (R1): A conversation belongs to the owner from `current_owner`; another owner's id (and an unknown or malformed id) returns 404, never 403, with the same body for every miss (test required)
+- [x] **CONV-03** (R2): Each turn stores the user's message, the rewritten question (if any), the answer as shown (after the output filter), the document scope and a timestamp
+- [x] **CONV-04** (R2): History is stored where a document delete removes it: single-document conversations under `data/uploads/<doc_id>/chat/` (in a subfolder so existing `chat/*.json` trace counts are unchanged); cross-document conversations either under a per-owner folder with the cross-document trace retention rule or refused for cross-document scope in this milestone (open decision D1, `.planning/research/SUMMARY.md`); deleting a document removes its conversation history (test required); `get_llm(..., cache_dir=None)` stays for every service LLM including any rewriter
 
 ### Rewrite before retrieval (R3, R4)
 
@@ -25,10 +25,10 @@ Requirements for the chat-memory milestone. Each maps to roadmap phases.
 
 ### Prompt, trust and budget (R5, R6, R7)
 
-- [ ] **PRMT-01** (R5): `build_prompts` (`rag/query/generate.py:51`) gains an optional history block of the last N turns holding questions and short answers, not full earlier answers; `SYSTEM_PROMPT` and `DOCUMENT_SYSTEM_PROMPT` are not changed
+- [x] **PRMT-01** (R5): `build_prompts` (`rag/query/generate.py:51`) gains an optional history block of the last N turns holding questions and short answers, not full earlier answers; `SYSTEM_PROMPT` and `DOCUMENT_SYSTEM_PROMPT` are not changed
 - [x] **PRMT-02** (R5): With no history the produced prompt is byte-identical to today's, so golden results and the LLM cache are unaffected (test: prompt equality on the golden set, snapshot committed before the first edit)
-- [ ] **PRMT-03** (R6): Stored turns go through `scan_text` and are shown and reused only after `filter_output`-style defanging (`rag/query/guard.py`), with stale `[S n]` citation markers stripped; the page renders history with `textContent`; streamed answers still go only through `StreamGuard`
-- [ ] **PRMT-04** (R7): History plus passages plus answer budget (including the reasoning model's 3000 thinking tokens, `docs/models.md`) fits the context window; a hard cap on turns/words per conversation is enforced before any model call with a clear error to the client; compaction is deferred (constants are open decision D3, pinned after the server's `max_model_len` is recorded)
+- [x] **PRMT-03** (R6): Stored turns go through `scan_text` and are shown and reused only after `filter_output`-style defanging (`rag/query/guard.py`), with stale `[S n]` citation markers stripped; the page renders history with `textContent`; streamed answers still go only through `StreamGuard`
+- [x] **PRMT-04** (R7): History plus passages plus answer budget (including the reasoning model's 3000 thinking tokens, `docs/models.md`) fits the context window; a hard cap on turns/words per conversation is enforced before any model call with a clear error to the client; compaction is deferred (constants are open decision D3, pinned after the server's `max_model_len` is recorded)
 
 ### Evaluation (R8)
 
@@ -98,18 +98,18 @@ Which phases cover which requirements. Updated during roadmap creation.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| CONV-01 | Phase 2 | Pending |
-| CONV-02 | Phase 2 | Pending |
-| CONV-03 | Phase 2 | Pending |
-| CONV-04 | Phase 2 | Pending |
+| CONV-01 | Phase 2 | Complete |
+| CONV-02 | Phase 2 | Complete |
+| CONV-03 | Phase 2 | Complete |
+| CONV-04 | Phase 2 | Complete |
 | RWR-01 | Phase 3 | Pending |
 | RWR-02 | Phase 3 | Pending |
 | RWR-03 | Phase 3 | Pending |
 | RWR-04 | Phase 3 | Pending |
-| PRMT-01 | Phase 2 | Pending |
+| PRMT-01 | Phase 2 | Complete |
 | PRMT-02 | Phase 1 | Complete |
-| PRMT-03 | Phase 2 | Pending |
-| PRMT-04 | Phase 2 | Pending |
+| PRMT-03 | Phase 2 | Complete |
+| PRMT-04 | Phase 2 | Complete |
 | EVAL-01 | Phase 4 | Pending |
 | EVAL-02 | Phase 4 | Pending |
 | EVAL-03 | Phase 4 | Pending |
