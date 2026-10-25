@@ -579,3 +579,12 @@ def test_the_results_file_records_every_decision():
     assert len(commit) == 40 and all(c in "0123456789abcdef" for c in commit), commit
     if shutil.which("git"):
         assert commit == rule_status()["rule_commit"]
+
+
+def test_the_rewriter_default_matches_the_recorded_choice(monkeypatch, tmp_path):
+    built = spied_settings(monkeypatch, tmp_path)
+    monkeypatch.setenv("RAG_REWRITE", "1")
+    build_default_service()
+    assert len(built) == 2, built
+    assert built[1] == (recorded("Rewriter chosen:").split(" ", 1)[0], None)
+    assert all(cache_dir is None for _, cache_dir in built), built
