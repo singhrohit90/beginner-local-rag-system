@@ -1,5 +1,7 @@
 # Multi-turn golden set: review state
 
+Step-by-step instructions for reviewing these rows, written for someone new to the project: `docs/chat_memory_owner_tasks.md`, Task A.
+
 `data/golden/ddia_conversations.jsonl` was drafted by the executor in an unattended run (Phase 4, D-03). Every row is
 an executor draft and is marked `"review": "pending-human"`. Answer rows reuse the gold pages, key facts and evidence
 terms of the single-turn question named by `source_id`; the turns, the message and the shortened or converted
