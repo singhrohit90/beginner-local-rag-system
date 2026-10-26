@@ -17,14 +17,14 @@ None of these blocks merging pull request #5. Items 2, 3 and 6 are needed only b
 
 | # | Item | In one sentence | Who | When |
 |---|------|-----------------|-----|------|
-| 1 | Model server down | The vLLM server on `pmausgpu1` is not running, so nothing can call the answer model. | Your team (the GPU machine) | now |
+| 1 | Model server down | Done: the server was back on 2026-10-26 and `max_model_len` was read (131072). | Your team (the GPU machine) | done |
 | 2 | Review 34 test rows | The 34 multi-turn test conversations were drafted by an AI agent; a person must check them. See Task A. | You, or someone you hand it to | any time |
 | 3 | Over-rewriting | The rewriter changes questions that did not need changing. See section 3. | Claude, as a small separate task | after item 2 |
-| 4 | Measurements not run | Answer quality and the gpt-oss comparison need the model server. See Task C. | Claude | after item 1 |
+| 4 | Measurements | Done 2026-10-26 (runs p6-qwen, p6-gptoss; `docs/chat_memory_eval.md`). Still ships off: failed c, f. Repeat after item 2. See Task C. | Claude | done; repeat after item 2 |
 | 5 | Flaky test | One test fails now and then when the machine is busy. See section 3. | Nobody now | only if it fails twice in a row |
 | 6 | Browser check of the page | Nobody has tried the new chat page in a real browser. See Task B. | You, or someone you hand it to | after item 1 |
 
-Smaller leftovers: the real `max_model_len` of the model server is unknown (code uses 8192 as a floor; read it when item 1 is fixed),
+Smaller leftovers: `max_model_len` was read on 2026-10-26 as 131072 and is now in the code (`docs/models.md`),
 14 minor code-review notes are written in `.planning/runs/20261021-1840-chat-memory/review-1.txt` on branch `flow/chat-memory`,
 `HANDOFF.md` is from 2026-10-13 and out of date, and the Gemini key is still marked for rotation.
 
@@ -122,6 +122,8 @@ seen it in a real browser. Follow-ups also need the answer model, so do this aft
 Write "skipped" for any check you cannot set up; that is fine.
 
 ## Task C: what Claude does once the model server is back (no work for you)
+
+Done on 2026-10-26 for steps 1 to 3 below, on the rows still pending review; repeat step 2 and 3 after Task A.
 
 1. Read the real `max_model_len` (`docs/models.md`, section "Context window") and replace the 8192 floor in `docs/models.md` and
    `MODEL_CONTEXT_TOKENS` in `rag/query/history.py`.
