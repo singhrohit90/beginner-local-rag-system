@@ -67,7 +67,8 @@ def budget_hits() -> List[Hit]:
     "question", [QUESTION_60_WORDS, QUESTION_2000_CHARS], ids=["60_word_question", "2000_char_question"]
 )
 def test_worst_case_prompt_fits_the_context_window(question):
-    # A pathological 1000-word question would exceed an 8192-token window; refusing it before the
+    # A pathological 1000-word question would exceed an 8192-token window (the refusal path is tested in
+    # tests/test_conversations.py with the constant patched to 8192); refusing it before the
     # model call is Phase 2's hard cap (PRMT-04). Plan-time arithmetic with the planned module:
     # worst case 2544 words, 7416 tokens for the 2000-character question.
     block = render_block(window(maximal_turns()))
@@ -233,3 +234,4 @@ def test_budget_constants_match_the_provisional_d3_numbers():
         assert MODEL_CONTEXT_TOKENS == 8192
     else:
         assert str(MODEL_CONTEXT_TOKENS) in section
+        assert MODEL_CONTEXT_TOKENS == 131072  # what the server reported on 2026-10-26

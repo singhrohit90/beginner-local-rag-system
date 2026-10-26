@@ -29,7 +29,7 @@ HISTORY_QUESTION_MAX_WORDS = 60  # words kept from each earlier question
 CONVERSATION_MAX_TURNS = 50  # stored turns per conversation; Phase 2 refuses the next turn past it
 CONVERSATION_MAX_STORED_WORDS = 20000  # question plus answer words stored per conversation; next turn refused at cap
 TOKENS_PER_WORD = 1.5  # estimate, not measured; Phase 2 calibrates it from usage.prompt_tokens
-MODEL_CONTEXT_TOKENS = 8192  # a floor, not a measurement (docs/models.md, Context window)
+MODEL_CONTEXT_TOKENS = 131072  # max_model_len the server reported on 2026-10-26 (docs/models.md, Context window); may change if it is restarted with another --max-model-len
 THINKING_TOKENS = 3000  # thinking budget the client adds to every answer request (docs/models.md, Generator row)
 ANSWER_TOKENS = 600  # max_output_tokens of an answer (rag/query/generate.py, rag/query/pipeline.py)
 
