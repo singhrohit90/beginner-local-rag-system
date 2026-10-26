@@ -6,6 +6,14 @@ One upload = one workspace folder:
 
 so documents never share an index and deleting one is deleting its folder. The existing
 pipelines are used as they are: ingest() builds the workspace, RagPipeline answers from it.
+
+Conversations (rag/api/conversations.py) live under the same root. A conversation over one document
+sits in that document's chat/conversations/ folder, so it goes with the folder; a conversation over
+several or all documents sits in _conversations/<owner_key>/ and is removed when any document of its
+scope is deleted.
+
+With `rewrite` on, a follow-up is rewritten into a standalone question before retrieval, an ambiguous
+one gets one clarifying question, and a new topic starts a clean history (rag/query/rewrite.py).
 """
 
 import hashlib
@@ -17,9 +25,13 @@ import shutil
 import threading
 import time
 import uuid
+import weakref
 from pathlib import Path
-from typing import Any, Dict, Iterator, List, Optional, Sequence, Set
+from typing import Any, Dict, Iterator, List, Optional, Sequence, Set, Tuple
 
+from rag.api.conversations import (
+    ConversationFull, ConversationStore, new_turn, since_topic_start, to_history_turns,
+)
 from rag.common.embed import Embedder
 from rag.common.llm import LLM
 from rag.common.chunk_store import ChunkStore, MemoryChunkStore, Scope
@@ -32,8 +44,11 @@ from rag.ingestion.sandbox import DEFAULT_MEMORY_MB, DEFAULT_TIMEOUT_SECONDS, ex
 from rag.query.about import answer_about
 from rag.query.configs import CONFIGS
 from rag.query.guard import filter_output, scan_chunks
+from rag.query.generate import build_prompts
+from rag.query.history import HISTORY_WINDOW_TURNS, HistoryTurn, block_turns, fits_context, render_block, window
 from rag.query.pipeline import RagPipeline, RetrievalPipeline
 from rag.query.rerank import Reranker
+from rag.query.rewrite import RewriteResult, needs_rewrite, rewrite_question
 
 logger = logging.getLogger("rag.api")
 DOC_ID = re.compile(r"^[0-9a-f]{12}$")
@@ -72,6 +87,9 @@ class DocumentService:
         max_pages: int = DEFAULT_MAX_PAGES,
         extract_timeout: float = DEFAULT_TIMEOUT_SECONDS,
         extract_memory_mb: int = DEFAULT_MEMORY_MB,
+        conversations: Optional[ConversationStore] = None,
+        rewrite: bool = False,
+        rewrite_llm: Optional[LLM] = None,
     ):
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
@@ -90,7 +108,15 @@ class DocumentService:
         self._create_lock = threading.Lock()  # two identical uploads at once must not both pass the duplicate check
         self._running: Set[str] = set()  # documents being ingested right now
         self._deleting: Set[str] = set()  # documents deleted while an ingestion was still running
+        self._deleted: Set[str] = set()  # every id deleted since start; ids are random, so never reused
         self.store: ChunkStore = store or MemoryChunkStore()  # a vector database plugs in here
+        # conversation files live under this root (D-01); a test may pass its own store on the same root
+        self.conversations = conversations or ConversationStore(self.root)
+        if rewrite and rewrite_llm is None:  # never fall back silently to the answer model
+            raise ValueError("rewrite needs a rewrite_llm")
+        # One switch for rewrite, clarify and topic switch; off means Phase 2 behaviour exactly.
+        self.rewrite = rewrite
+        self.rewrite_llm = rewrite_llm  # built with no disk cache: it sees conversation text from uploads
         self._recover_interrupted()
 
     # ---- paths and status ---------------------------------------------------------------
@@ -102,6 +128,18 @@ class DocumentService:
         if doc_id in self._deleting or not path.is_dir():
             raise NotFound(doc_id)
         return path
+
+    def _alive(self, doc_ids: Sequence[str]) -> bool:
+        """The conversation writer's check: True only while every document still exists and is not
+        being deleted. A deleted id stays dead even if rmtree left its folder behind (Windows)."""
+        try:
+            for doc_id in doc_ids:
+                if doc_id in self._deleted:
+                    return False
+                self._dir(doc_id)
+        except NotFound:
+            return False
+        return True
 
     @staticmethod
     def _retry(action, errors, seconds: float = 2.0):
@@ -356,8 +394,14 @@ class DocumentService:
         # finds the id in _deleting and is refused.
         with self._load_lock:
             self._deleting.add(doc_id)
+            self._deleted.add(doc_id)  # a tombstone for _alive; _deleting is discarded at the end
             self.store.delete_document(doc_id)
-        self._remove_tree(directory)
+        # A conversation writer holds the same lock while it checks the documents are alive and writes, so
+        # a write either lands before the folder goes (and goes with it, or is purged) or starts after it
+        # (and is dropped). The purge runs while the id is still marked as deleting.
+        with self.conversations.lock:
+            self._remove_tree(directory)
+            self.conversations.purge_document(owner, doc_id)
         if doc_id not in self._running:  # otherwise the ingestion thread finishes the cleanup when it stops
             self._deleting.discard(doc_id)
 
@@ -435,25 +479,88 @@ class DocumentService:
         }
 
     def ask(self, doc_id: str, owner: str, question: str, config: str = "weighted",
-            style: str = "standard") -> Dict[str, Any]:
-        return self.ask_documents(owner, [doc_id], question, config, style)
+            style: str = "standard", conversation_id: Optional[str] = None) -> Dict[str, Any]:
+        return self.ask_documents(owner, [doc_id], question, config, style, conversation_id=conversation_id)
 
-    def _retrieve(self, owner: str, doc_ids: Optional[Sequence[str]], question: str, config: str, style: str):
-        """Everything before the model is called: which documents, loading them, and the retrieval
-        trace. Raises NotFound or BadUpload here, so a streaming request can still answer with a
-        proper HTTP status before any streaming starts."""
+    def _rewrite(self, question: str, turns: List[Dict[str, Any]], names: Dict[str, str]) -> Tuple[RewriteResult, List[HistoryTurn]]:
+        """The effective question and the earlier turns the answer prompt may show. Never raises:
+        rewrite_question is total, so a down rewriter is a "fallback" result, not an error (D-09)."""
+        if not self.rewrite:  # Phase 2's window exactly; stored kind and topic_start flags are ignored
+            return RewriteResult("off", question), window(to_history_turns(turns), HISTORY_WINDOW_TURNS)
+        win = window(to_history_turns(since_topic_start(turns)), HISTORY_WINDOW_TURNS)
+        if not needs_rewrite(question, win):
+            return RewriteResult("skipped", question), win
+        allow = not (turns and turns[-1].get("kind", "answer") == "clarify")  # never two in a row (D-13)
+        result = rewrite_question(self.rewrite_llm, question, win, allow_clarify=allow,
+                                  doc_names=list(names.values()))
+        # a new topic shows no earlier turn in this turn's prompt (D-14)
+        return result, [] if result.status == "new_topic" else win
+
+    def _retrieve(self, owner: str, doc_ids: Optional[Sequence[str]], question: str, config: str, style: str,
+                  conversation_id: Optional[str] = None):
+        """Everything before the model is called: which documents, the conversation, loading the
+        documents, and the retrieval trace. Every failure (NotFound, BadUpload, NoSuchConversation,
+        ConversationBusy, ConversationFull) raises here, before any model call, so a streaming request
+        can still answer with a proper HTTP status before any streaming starts. The documents are
+        checked before the conversation, so a request failing both gets the document error. The
+        conversation's lease is released on any raise after it was taken; on success the caller owns
+        it (info["lease"]). Retrieval runs on the effective question: the rewrite when the rewrite step
+        accepted one, else the raw message; the history only reaches the prompt."""
         statuses = self._ready_documents(owner, doc_ids)
-        for status in statuses:
-            self._ensure_loaded(status)
-        names = {status["id"]: status["name"] for status in statuses}
-        retrieval = RetrievalPipeline(self.store, self.embedder, Scope(owner, tuple(names)), self.reranker)
-        single = len(statuses) == 1
-        started = time.perf_counter()
-        query_id = f"{statuses[0]['id'] if single else 'multi'}-{int(time.time() * 1000)}"
-        rag = RagPipeline(retrieval, self.llm, style=style, subject="document")
-        trace = retrieval.run(query_id, question, CONFIGS[config])
-        return rag, trace, {"names": names, "single": single, "started": started, "query_id": query_id,
-                            "first": statuses[0]["id"]}
+        conversation = self.conversations.open(owner, doc_ids, conversation_id)
+        lease = self.conversations.lease(conversation)
+        try:
+            turns = self.conversations.load_turns(conversation)  # read after the lease, so none is missed
+            self.conversations.check_room(turns)
+            for status in statuses:
+                self._ensure_loaded(status)
+            names = {status["id"]: status["name"] for status in statuses}
+            retrieval = RetrievalPipeline(self.store, self.embedder, Scope(owner, tuple(names)), self.reranker)
+            single = len(statuses) == 1
+            started = time.perf_counter()
+            query_id = f"{statuses[0]['id'] if single else 'multi'}-{int(time.time() * 1000)}"
+            rag = RagPipeline(retrieval, self.llm, style=style, subject="document")
+            # Built before retrieval, so the rewrite step and the clarify return can use it; the final
+            # return hands back this same dict. "question" is the raw message as sent.
+            info = {"names": names, "single": single, "started": started, "query_id": query_id,
+                    "first": statuses[0]["id"], "conversation": conversation, "lease": lease,
+                    "turn": len(turns) + 1, "question": question}
+            result, shown_turns = self._rewrite(question, turns, names)
+            info["rewrite"] = result
+            if result.status == "clarify":
+                # A clarifying question is decided here, before any SSE byte, like every other outcome:
+                # no retrieval, no trace, no answer-model call. The lease stays held; the caller releases it.
+                info["query_id"] = f"clarify-{int(time.time() * 1000)}"
+                info["clarify"] = result.clarify_question
+                info["history_block"] = ""
+                return None, None, info
+            trace =retrieval.run(query_id, result.question, CONFIGS[config])  # the effective question (D-10)
+            block = render_block(shown_turns)  # rendered after the rewrite decision (D-14)
+            info["history_block"] = block
+            if block:
+                # Measured on the real prompt, so spotlight framing counts; never on a first turn, so a
+                # single-turn question behaves exactly as today. Not trace.prompt: the stream builds its
+                # prompt lazily. The same 409 as the caps; the except below releases the lease.
+                system, user = build_prompts(trace.question, trace.stage("context").hits, style, "document",
+                                             history_block=block)
+                if not fits_context(system, user):
+                    raise ConversationFull()
+            shown = block_turns(block)
+            trace.config["conversation"] = {"id": conversation.id, "turn": len(turns) + 1,
+                                            "history_turns": shown, "dropped_turns": len(turns) - shown}
+            if self.rewrite:  # with the switch off the dict keeps exactly the four Phase 2 keys
+                trace.config["conversation"].update(
+                    original_question=question,
+                    rewritten_question=result.rewritten_question,
+                    rewrite=result.status,
+                    fallback_reason=result.reason,
+                    rewrite_ms=result.elapsed_ms,
+                    rejected_question=result.rejected_question,  # trace only, never the response (A11)
+                )
+            return rag, trace, info
+        except BaseException:
+            lease.release()
+            raise
 
     def _describe(self, trace, info: Dict[str, Any]) -> Dict[str, Any]:
         """Save the trace (single-document questions only) and build the response."""
@@ -470,6 +577,10 @@ class DocumentService:
         context = trace.stage("context").hits
         return {
             "query_id": query_id,
+            "conversation_id": info["conversation"].id,
+            "turn": info["turn"],
+            "kind": "answer",
+            "rewrite": info["rewrite"].as_response(),
             "answer": trace.answer,
             "abstained": usage.get("abstained", False),
             "blocked": usage.get("blocked", []),
@@ -487,26 +598,89 @@ class DocumentService:
             "seconds": round(time.perf_counter() - started, 2),
         }
 
+    def _clarify_response(self, info: Dict[str, Any]) -> Dict[str, Any]:
+        """The normal response shape for a clarifying question, built from info only: there is no trace
+        and no context stage. The text passes the same output filter as every other answer."""
+        checked = filter_output(info["clarify"], "")
+        return {
+            "query_id": info["query_id"],
+            "conversation_id": info["conversation"].id,
+            "turn": info["turn"],
+            "kind": "clarify",
+            "rewrite": info["rewrite"].as_response(),
+            "answer": checked.answer,
+            "abstained": False,
+            "blocked": checked.reasons,
+            "citations": [],
+            "documents": [{"id": doc_id, "name": name} for doc_id, name in info["names"].items()],
+            "passages": [],
+            "skipped_by_scanner": [],
+            "stages": [],
+            "llm": self.rewrite_llm.name,  # the model that wrote the question
+            "seconds": round(time.perf_counter() - info["started"], 2),
+        }
+
+    def _remember(self, trace, info: Dict[str, Any], result: Dict[str, Any]) -> None:
+        """Store the turn as the caller saw it, then free the conversation. Called only on the success
+        path, before the answer is returned or the final event is yielded (D-09, D-10); it runs whether
+        or not keep_traces is on, because the history is what the next question needs (D-11)."""
+        turn = new_turn(info["question"], result["answer"], list(info["names"]), info["query_id"],
+                        rewritten=info["rewrite"].rewritten_question, kind=result.get("kind", "answer"),
+                        topic_start=info["rewrite"].status == "new_topic")
+        try:
+            self.conversations.append_turn(info["conversation"], turn, self._alive)
+        finally:
+            info["lease"].release()
+
     def ask_documents(self, owner: str, doc_ids: Optional[Sequence[str]], question: str,
-                      config: str = "weighted", style: str = "standard") -> Dict[str, Any]:
-        """Answer from one, several or (doc_ids None) all of the owner's documents."""
-        rag, trace, info = self._retrieve(owner, doc_ids, question, config, style)
-        rag.answer(trace)
-        return self._describe(trace, info)
+                      config: str = "weighted", style: str = "standard",
+                      conversation_id: Optional[str] = None) -> Dict[str, Any]:
+        """Answer from one, several or (doc_ids None) all of the owner's documents. conversation_id None
+        starts a new conversation; the response carries its id and the turn number."""
+        rag, trace, info = self._retrieve(owner, doc_ids, question, config, style, conversation_id)
+        try:
+            if trace is None:  # a clarifying question: stored as a turn, nothing retrieved or answered
+                result = self._clarify_response(info)
+                self._remember(None, info, result)
+                return result
+            rag.answer(trace, history_block=info["history_block"])
+            result = self._describe(trace, info)
+            self._remember(trace, info, result)
+            return result
+        finally:
+            info["lease"].release()
 
     def ask_documents_stream(self, owner: str, doc_ids: Optional[Sequence[str]], question: str,
-                             config: str = "weighted", style: str = "standard") -> Iterator[Dict[str, Any]]:
+                             config: str = "weighted", style: str = "standard",
+                             conversation_id: Optional[str] = None) -> Iterator[Dict[str, Any]]:
         """Like ask_documents, but returns the answer as a stream of events:
 
             {"event": "token", "data": {"text": ...}}   text that has passed the stream guard
-            {"event": "final", "data": {...}}           the same response as ask_documents, plus
+            {"event": "final", "data": {...}}           the same response as ask_documents (with
+                                                        "conversation_id" and "turn"), plus
                                                         "replace": true when the text already sent must be
                                                         replaced by data["answer"] (the final check failed)
 
-        Retrieval happens before this returns, so a missing document or a not-ready one raises here,
-        not part-way through a stream. Closing the returned iterator stops the model."""
-        rag, trace, info = self._retrieve(owner, doc_ids, question, config, style)
-        stream = rag.stream(trace)
+        Retrieval happens before this returns, so a missing document or a not-ready one, and an unknown,
+        busy or full conversation, raises here, not part-way through a stream. Closing the returned
+        iterator stops the model. A clarifying question arrives as one final event with "kind"
+        "clarify" and no token events."""
+        rag, trace, info = self._retrieve(owner, doc_ids, question, config, style, conversation_id)
+        if trace is None:  # a clarifying question, decided before any SSE byte
+            try:
+                result = self._clarify_response(info)
+                result["replace"] = False
+                self._remember(None, info, result)
+            finally:
+                info["lease"].release()
+
+            def clarified() -> Iterator[Dict[str, Any]]:
+                # a generator, not a list iterator: the route's frames() calls close() on what it gets
+                yield {"event": "final", "data": result}
+
+            return clarified()
+        lease = info["lease"]
+        stream = rag.stream(trace, history_block=info["history_block"])  # a generator: creating it runs nothing
 
         def events() -> Iterator[Dict[str, Any]]:
             try:
@@ -516,8 +690,15 @@ class DocumentService:
                     else:
                         result = self._describe(trace, info)
                         result["replace"] = bool(value)
+                        # persist, then release, then yield: a client that asks again the moment it sees
+                        # final must not get a spurious 409 while this generator waits to be closed
+                        self._remember(trace, info, result)
                         yield {"event": "final", "data": result}
             finally:
                 stream.close()  # a reader that went away must stop the model, not leave it running
+                lease.release()  # idempotent: a model error, a guard stop, a disconnect or an early close
 
-        return events()
+        generator = events()
+        # a generator that is never started never runs its finally; dropping it must still free the conversation
+        weakref.finalize(generator, lease.release)
+        return generator

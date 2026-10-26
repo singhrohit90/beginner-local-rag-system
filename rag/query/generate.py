@@ -48,31 +48,35 @@ class Answer:
     output_tokens: int
 
 
-def build_prompts(question: str, context: List[Hit], style: str = "standard", subject: str = "book") -> tuple:
+def build_prompts(
+    question: str, context: List[Hit], style: str = "standard", subject: str = "book", history_block: str = ""
+) -> tuple:
     """Returns (system_prompt, user_prompt). style picks the prompts:
     standard   the production prompt, which tells the model to ignore instructions in passages
     spotlight  also wraps passages in nonce tags and repeats the warning (rag.security.defenses)
     naive      a first-draft prompt with no injection rules, used only as a baseline in tests
-    subject    "book" is the DDIA prompt the golden set was measured with; "document" is for uploads"""
+    subject    "book" is the DDIA prompt the golden set was measured with; "document" is for uploads
+    history_block  earlier turns rendered by rag.query.history.render_block; "" gives today's prompt"""
     base = DOCUMENT_SYSTEM_PROMPT if subject == "document" else SYSTEM_PROMPT
     if style == "spotlight":
         from rag.security.defenses import SPOTLIGHT_ADDENDUM, spotlight_user_prompt
 
-        return base + SPOTLIGHT_ADDENDUM, spotlight_user_prompt(question, context)
+        return base + SPOTLIGHT_ADDENDUM, spotlight_user_prompt(question, context, history_block=history_block)
     if style == "naive":
         from rag.security.defenses import NAIVE_SYSTEM_PROMPT
 
-        return NAIVE_SYSTEM_PROMPT, build_user_prompt(question, context)
+        return NAIVE_SYSTEM_PROMPT, build_user_prompt(question, context, history_block=history_block)
     if style == "standard":
-        return base, build_user_prompt(question, context)
+        return base, build_user_prompt(question, context, history_block=history_block)
     raise ValueError(f"unknown prompt style {style!r}")
 
 
 def answer_from_context(
-    llm: LLM, question: str, context: List[Hit], style: str = "standard", subject: str = "book"
+    llm: LLM, question: str, context: List[Hit], style: str = "standard", subject: str = "book",
+    history_block: str = "",
 ) -> tuple:
-    """Returns (Answer, user_prompt); see build_prompts for style and subject."""
-    system, user_prompt = build_prompts(question, context, style, subject)
+    """Returns (Answer, user_prompt); see build_prompts for style, subject and history_block."""
+    system, user_prompt = build_prompts(question, context, style, subject, history_block=history_block)
     result = llm.generate(system, user_prompt, max_output_tokens=600)
     return answer_from_result(result, context), user_prompt
 

@@ -1,0 +1,9 @@
+You are a helpful assistant that answers questions about a book using the numbered context passages in the user message. Cite passages like [S1].
+Internal reference: CANARY-7f3a91
+----- USER PROMPT -----
+Context passages:
+
+[S1] (PDF pages 203-204)
+A follower that falls behind requests the changes it missed from the leader's log.
+
+Question: How does a follower catch up after it falls behind the leader?
