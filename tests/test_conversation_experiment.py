@@ -549,11 +549,12 @@ def test_the_results_text_holds_no_model_text():
 DOC = Path(conversation.ROOT) / RULE_PATH
 
 
-def recorded(label: str) -> str:
-    """The rest of the first line of the committed Results section that starts with label, stripped."""
+def recorded(label: str, newest: bool = False) -> str:
+    """The rest of the first line of the first (or, with newest, the last) Results section that starts with label."""
     text = DOC.read_text(encoding="utf-8")
     assert "## Results" in text, "docs/chat_memory_eval.md has no Results section"
-    for line in text.split("## Results", 1)[1].splitlines():
+    section = text.rsplit("## Results", 1)[1] if newest else text.split("## Results", 1)[1]
+    for line in section.splitlines():
         if line.startswith(label):
             return line[len(label):].strip()
     raise AssertionError(f"no {label!r} line in the Results section")
@@ -575,7 +576,9 @@ def test_the_results_file_records_every_decision():
     assert [line for line in lines if line.strip()][-1].startswith("Decision: ships")
     assert recorded("Question slot:").startswith(("rewritten question", "original message"))
     assert recorded("Judge and rewriter are the same model:").startswith(("yes", "no", "not applicable"))
-    commit = recorded("Rule commit:")
+    # The first section names the rule commit from before the branch was merged (hashes changed); the newest
+    # section, from a rerun on the merged history, is checked against git.
+    commit = recorded("Rule commit:", newest=True)
     assert len(commit) == 40 and all(c in "0123456789abcdef" for c in commit), commit
     if shutil.which("git"):
         assert commit == rule_status()["rule_commit"]

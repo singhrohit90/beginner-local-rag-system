@@ -348,8 +348,8 @@ prompt; `SYSTEM_PROMPT` is unchanged.
 
 Limits and errors: a conversation holds at most `CONVERSATION_MAX_TURNS = 50` turns and
 `CONVERSATION_MAX_STORED_WORDS = 20000` stored words, and a prompt with history must fit the context estimate
-(`fits_context`; `MODEL_CONTEXT_TOKENS = 8192` is a floor written in the code, the server's real context length
-is not read). An unknown, malformed, another owner's or another scope's id is one 404 "no such conversation";
+(`fits_context`; `MODEL_CONTEXT_TOKENS = 131072` is the `max_model_len` the server reported on 2026-10-26, see
+`docs/models.md`). An unknown, malformed, another owner's or another scope's id is one 404 "no such conversation";
 a second question while one is being answered is a 409 "conversation is busy, retry when the previous answer is
 finished"; a full conversation is a 409 "this conversation is full; start a new conversation". There is no
 compaction (see `docs/backlog.md`).
@@ -368,11 +368,17 @@ Measured: on 30 answer items of the multi-turn golden set (`data/golden/ddia_con
 evidence-aware hit@5 was 0.633 with rewriting off and 0.733 with it on (mrr 0.461 and 0.592), against 0.867 for
 the hand-written standalone questions; the gain is 10.0 points, the band 10.0 points, with 6 wins and 3 losses
 (sign test p = 0.2539) and one standalone question lost. First turns are unchanged: 37/37 single-turn questions
-gave identical results with zero rewriter calls (hit@5 0.865, mrr 0.663). The rewriter was qwen
-(`ollama:qwen2.5:7b`) by default, not compared with gpt-oss; the answer arm (fact checklist) was not run because
-the generator was unreachable, so the question slot and the judge-versus-rewriter question are not measured.
+gave identical results with zero rewriter calls (hit@5 0.865, mrr 0.663). That was run p4-qwen. A rerun on
+2026-10-26 (runs p6-qwen and p6-gptoss) measured the rest: with gpt-oss (`vllm:/models/gpt-oss-20b`, reasoning effort
+low) as the rewriter, on hit@5 was 0.833 (mrr 0.647) against 0.633 off and 0.733 for qwen, gain 20.0 points against a
+band of 10.0, 7 wins and 1 loss (sign test p = 0.0352), 0 fallbacks in 28 calls, p50 1955.7 ms against 2968.9 ms for
+qwen; the rule picks gpt-oss (inside the band, lower latency). Answer arm (fact checklist, judge qwen2.5:7b, which is also
+the rewriter in that run): off 13 of 26, on 18 of 29 (0.621), on_original 18 of 28 (0.643), oracle 18 of 27; the
+question slot stays the rewritten question. Still one standalone question lost, so condition (c) fails; gpt-oss
+rewrote none of the 37 questions after one unrelated turn (qwen: 17). The gpt-oss answers were not run (answers arm
+used qwen's rewrites). Rerun decision: ships off (failed: c, f; provisional: items pending human review).
 The results are provisional: 34 of 34 items are pending human review, and the numbers are provisional until every
-item is approved and the run is repeated. Decision: ships off (failed: a, c, f; provisional: items pending human
+item is approved and the run is repeated. The p4-qwen decision was: ships off (failed: a, c, f; provisional: items pending human
 review)
 
 Over-rewriting: with one unrelated earlier turn in front of the 37 single-turn questions (reported, not gating), qwen rewrote 16 of them in the phase gate run (17 in the run the eval file records) and hit@5 changed on 6 of 37 (`.planning/phases/04-multi-turn-evaluation-and-the-default-decision/04-10-SUMMARY.md`). It is not part of the shipping rule.
